@@ -78,25 +78,30 @@ export async function writeRegularFile(path: string, content: string, overwrite:
     return;
   }
   const handle = await open(path, constants.O_RDWR | noFollow);
-  let identity: { dev: number; ino: number };
   try {
     const info = await handle.stat();
-    if (!info.isFile() || sha256Text(await handle.readFile()) !== expectedCurrentSha256) {
+    if (!info.isFile() || info.size > 150_000) {
+      throw new Error("Only regular files within the configured size limit may be overwritten.");
+    }
+
+    const chunks: Buffer[] = [];
+    let position = 0;
+    while (position < info.size) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, info.size - position));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+
+    if (position !== info.size || sha256Text(Buffer.concat(chunks, position)) !== expectedCurrentSha256) {
       throw new Error("Target changed after preflight; run preview_write again.");
     }
-    identity = { dev: info.dev, ino: info.ino };
-  } finally { await handle.close(); }
 
-  const writeHandle = await open(path, constants.O_WRONLY | noFollow);
-  try {
-    const latest = await writeHandle.stat();
-    if (!latest.isFile() || latest.dev !== identity.dev || latest.ino !== identity.ino) {
-      throw new Error("Target identity changed after preflight; overwrite was refused.");
-    }
-    await writeHandle.truncate(0);
-    await writeHandle.writeFile(content, "utf8");
-    await writeHandle.sync();
-  } finally { await writeHandle.close(); }
+    await handle.truncate(0);
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+  } finally { await handle.close(); }
 }
 export async function deleteRegularFile(path: string, expectedCurrentSha256: string): Promise<void> {
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));

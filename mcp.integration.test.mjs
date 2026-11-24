@@ -211,6 +211,10 @@ test("approved deletion removes the exact preflighted file", async () => {
 test("git_diff excludes sensitive content and rejects explicit sensitive paths", async () => {
   const sensitive = "DIFF_SECRET_SENTINEL_4B2C";
   await writeFile(join(repo, ".env"), "TOKEN=" + sensitive);
+  await writeFile(join(repo, ".AWS", "credentials"), "TOKEN=" + sensitive);
+  await writeFile(join(repo, "nested", ".SSH", "id_rsa"), "TOKEN=" + sensitive);
+  await writeFile(join(repo, "PRIVATE.PEM"), sensitive);
+  await writeFile(join(repo, "nested", "Credentials.JSON"), sensitive);
   await writeFile(join(repo, "public.txt"), "public file changed");
   const result = await client.callTool({ name: "git_diff", arguments: {} });
   const value = output(result);
@@ -218,4 +222,5 @@ test("git_diff excludes sensitive content and rejects explicit sensitive paths",
   assert.doesNotMatch(value, new RegExp(sensitive));
   assertError(await client.callTool({ name: "git_diff", arguments: { path: ".env" } }), /non-sensitive/);
   assertError(await client.callTool({ name: "git_diff", arguments: { path: "nested/credentials.json" } }), /non-sensitive/);
+  assertError(await client.callTool({ name: "git_diff", arguments: { path: "PRIVATE.PEM" } }), /non-sensitive/);
 });

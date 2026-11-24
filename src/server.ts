@@ -5,14 +5,38 @@ import { z } from "zod";
 import { spawn } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
+import { isAbsolute } from "node:path";
 
-const REPO = resolve(homedir(), "Documents/Code/collectors-vault");
+const repoValue = process.env.REPO?.trim();
+if (!repoValue) {
+  throw new Error("REPO is required. Set it to the absolute path of the repository this MCP server may access.");
+}
+if (!isAbsolute(repoValue)) {
+  throw new Error("REPO must be an absolute filesystem path.");
+}
+
+const REPO = await realpath(resolve(repoValue));
+const COMMAND_CENTER_LOG_PATH = resolve(
+  process.env.COMMAND_CENTER_LOG?.trim() ||
+  resolve(tmpdir(), "chatgpt-mac-terminal-command-center.log")
+);
+const SERVER_NAME = process.env.MCP_SERVER_NAME?.trim() || "mac-terminal";
+const configuredNpmScripts = (process.env.ALLOWED_NPM_SCRIPTS ?? "build,test,typecheck")
+  .split(",")
+  .map(script => script.trim())
+  .filter(Boolean);
+
+if (configuredNpmScripts.some(script => !/^[a-zA-Z0-9:_-]+$/.test(script))) {
+  throw new Error("ALLOWED_NPM_SCRIPTS may contain only letters, numbers, colon, underscore, and hyphen.");
+}
+
+const allowedNpmScripts = new Set(configuredNpmScripts);
 const MAX_OUTPUT = 150_000;
 
 
 const commandCenterLog = createWriteStream(
-  "/tmp/collectors-vault-command-center.log",
+  COMMAND_CENTER_LOG_PATH,
   { flags: "a" }
 );
 
@@ -61,7 +85,7 @@ async function run(
   };
 
   const header = panel([
-    "COLLECTORS VAULT  /  COMMAND CENTER",
+    "MAC TERMINAL  /  COMMAND CENTER",
     "MAC TERMINAL EXECUTION",
     "",
     "STATUS       RUNNING",
@@ -138,7 +162,7 @@ async function run(
       const statusColor = exitCode === 0 ? c.green : c.red;
 
       const rows = [
-        "COLLECTORS VAULT  /  EXECUTION REPORT",
+        "MAC TERMINAL  /  EXECUTION REPORT",
         "",
         "RESULT       " + status,
         "EXIT CODE    " + exitCode,
@@ -231,13 +255,13 @@ async function safePath(relativePath: string): Promise<string> {
 }
 
 const server = new McpServer({
-  name: "collectors-vault-mac",
+  name: SERVER_NAME,
   version: "1.0.0"
 });
 
 server.tool(
   "git_status",
-  "Read-only Git status for Collectors Vault.",
+  "Read-only Git status for the configured repository.",
   {},
   async () => ({
     content: [{
@@ -322,14 +346,24 @@ server.tool(
 
 server.tool(
   "run_npm_script",
-  "Run one approved npm script in Collectors Vault.",
+  "Run one npm script explicitly included in ALLOWED_NPM_SCRIPTS for the configured repository.",
   {
-    script: z.enum(["test", "build", "typecheck", "build:lambda-web"])
+    script: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9:_-]+$/)
   },
   async ({ script }) => {
     const packageJson = JSON.parse(
       await readFile(resolve(REPO, "package.json"), "utf8")
     );
+
+    if (!allowedNpmScripts.has(script)) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: `Script is not in ALLOWED_NPM_SCRIPTS: ${script}`
+        }]
+      };
+    }
 
     if (!packageJson.scripts?.[script]) {
       return {
@@ -352,7 +386,7 @@ server.tool(
 
 server.tool(
   "run_command",
-  "Execute an approved read-only command in the Collectors Vault repository and stream its output to the Mac Terminal.",
+  "Execute an exact allowlisted read-only command in the configured repository and stream its output to the Mac Terminal.",
   { command: z.string().trim().min(1).max(300) },
   async ({ command }) => {
     const parts = command.trim().split(/\s+/);
@@ -380,7 +414,6 @@ server.tool(
       ["git", "diff", "--stat"],
       ["git", "diff", "--name-only"],
       ["git", "rev-parse", "--show-toplevel"],
-      ["npx", "vitest", "run", "tests/auth.test.ts"]
     ];
 
     const approved = allowedCommands.some(

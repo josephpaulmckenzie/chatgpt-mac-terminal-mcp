@@ -73,3 +73,22 @@ test("preflight tickets expire and reject mismatched payloads", () => {
   const expiringToken = store.issue(ticket, 100);
   assert.equal(store.consume(expiringToken, ticket, 5 * 60_000 + 101), null);
 });
+test("preflight tickets defensively copy findings at issue and consume", () => {
+  const store = new PreflightTicketStore();
+  const findings = [{ category: "email_address", line: 1, value: "[redacted]" }];
+  const ticket = {
+    operation: "write",
+    repository: "repo",
+    path: "README.md",
+    overwrite: false,
+    currentSha256: null,
+    proposedSha256: "new",
+    findings
+  };
+  const token = store.issue(ticket, 100);
+  findings[0].value = "mutated by caller";
+  const consumed = store.consume(token, ticket, 101);
+  assert.equal(consumed?.findings[0]?.value, "[redacted]");
+  if (consumed) consumed.findings[0].value = "mutated by consumer";
+  assert.equal(findings[0]?.value, "mutated by caller");
+});

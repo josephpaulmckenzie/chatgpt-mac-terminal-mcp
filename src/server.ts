@@ -1,4 +1,3 @@
-import { createWriteStream } from 'node:fs';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -8,6 +7,7 @@ import { isAbsolute, resolve } from "node:path";
 import { PreflightTicketStore, scanSensitiveContent, sha256Text } from "./writePreflight.js";
 import { deleteRegularFile, isProtectedRepositoryPath, readRegularFile, resolveRepositoryFile, writeRegularFile } from "./fileSafety.js";
 import { tmpdir } from "node:os";
+import { openSecureLog } from "./secureLog.js";
 
 const repoValue = process.env.REPO?.trim();
 if (!repoValue) {
@@ -64,10 +64,7 @@ async function currentFileSha256(path: string): Promise<string | null> {
 }
 
 
-const commandCenterLog = createWriteStream(
-  COMMAND_CENTER_LOG_PATH,
-  { flags: "a" }
-);
+const commandCenterLog = await openSecureLog(COMMAND_CENTER_LOG_PATH);
 
 commandCenterLog.on("error", (error) => {
   process.stderr.write("[Command Center log error] " + error.message + "\n");

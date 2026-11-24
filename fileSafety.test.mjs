@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deleteRegularFile, readRegularFile, resolveRepositoryFile, writeRegularFile } from "./dist/fileSafety.js";
 import { sha256Text } from "./dist/writePreflight.js";
+import { openSecureLog } from "./dist/secureLog.js";
+import { once } from "node:events";
 
 async function withRepo(run) {
   const root = await mkdtemp(join(tmpdir(), "mcp-file-safety-"));
@@ -56,5 +58,49 @@ test("deletes only the exact preflighted file", async () => withRepo(async root 
   await writeFile(path, "keep");
   await assert.rejects(deleteRegularFile(path, sha256Text("changed")), /changed after preflight/);
   await deleteRegularFile(path, sha256Text("keep"));
+  await assert.rejects(readFile(path));
+}));
+test("command log refuses symlinks and hard links and enforces private permissions", async () => withRepo(async root => {
+  const logPath = join(root, "command.log");
+  const stream = await openSecureLog(logPath);
+  const finished = once(stream, "finish");
+  stream.end("private log entry");
+  await finished;
+  assert.equal(await readFile(logPath, "utf8"), "private log entry");
+  assert.equal((await lstat(logPath)).mode & 0o777, 0o600);
+
+  const target = join(root, "target.log");
+  await writeFile(target, "do not append");
+  const symlinkPath = join(root, "symlink.log");
+  await symlink(target, symlinkPath);
+  await assert.rejects(openSecureLog(symlinkPath));
+
+  const linkedPath = join(root, "linked.log");
+  await writeFile(linkedPath, "shared");
+  await link(linkedPath, join(root, "linked-copy.log"));
+  await assert.rejects(openSecureLog(linkedPath), /hard links/);
+}));
+
+test("serializes concurrent overwrites against one preflight hash", async () => withRepo(async root => {
+  const path = join(root, "concurrent.txt");
+  await writeFile(path, "original");
+  const results = await Promise.allSettled([
+    writeRegularFile(path, "first writer", true, sha256Text("original")),
+    writeRegularFile(path, "second writer", true, sha256Text("original"))
+  ]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
+  assert.ok(["first writer", "second writer"].includes(await readFile(path, "utf8")));
+}));
+
+test("serializes concurrent deletions and deletes at most once", async () => withRepo(async root => {
+  const path = join(root, "concurrent-delete.txt");
+  await writeFile(path, "delete once");
+  const results = await Promise.allSettled([
+    deleteRegularFile(path, sha256Text("delete once")),
+    deleteRegularFile(path, sha256Text("delete once"))
+  ]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
   await assert.rejects(readFile(path));
 }));

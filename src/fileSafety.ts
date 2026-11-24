@@ -4,11 +4,26 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { sha256Text } from "./writePreflight.js";
 const BLOCKED_SEGMENTS = new Set([".git", "node_modules", ".aws", ".ssh", "secret", "secrets"]);
 const BLOCKED_EXTENSIONS = [".pem", ".key", ".p12", ".pfx"];
+const pathLocks = new Map<string, Promise<void>>();
+
+async function withPathLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const key = process.platform === "darwin" ? path.toLowerCase() : path;
+  const previous = pathLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolveLock => { release = resolveLock; });
+  pathLocks.set(key, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (pathLocks.get(key) === current) pathLocks.delete(key);
+  }
+}
+
 function validateRelativePath(relativePath: string): string[] {
   if (!relativePath.trim() || isAbsolute(relativePath) || /[\u0000-\u001f]/.test(relativePath)) throw new Error("A valid repository-relative file path is required.");
   const segments = relativePath.replaceAll("\\", "/").split("/");
-  const lower = segments.map(segment => segment.toLowerCase());
-  const leaf = lower.at(-1) ?? "";
   if (segments.some(segment => !segment || segment === "." || segment === "..") || isProtectedRepositoryPath(relativePath)) throw new Error("Sensitive or protected paths are prohibited.");
   return segments;
 }
@@ -46,7 +61,7 @@ export async function resolveRepositoryFile(repository: string, relativePath: st
   return current;
 }
 export async function readRegularFile(path: string, maxBytes: number): Promise<Buffer> {
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size > maxBytes) throw new Error("Only regular files within the configured size limit may be read.");
@@ -65,7 +80,7 @@ export async function readRegularFile(path: string, maxBytes: number): Promise<B
     return Buffer.concat(chunks, position);
   } finally { await handle.close(); }
 }
-export async function writeRegularFile(path: string, content: string, overwrite: boolean, expectedCurrentSha256: string | null): Promise<void> {
+async function writeRegularFileUnlocked(path: string, content: string, overwrite: boolean, expectedCurrentSha256: string | null): Promise<void> {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   if (!overwrite) {
     const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
@@ -76,7 +91,7 @@ export async function writeRegularFile(path: string, content: string, overwrite:
     } finally { await handle.close(); }
     return;
   }
-  const handle = await open(path, constants.O_RDWR | noFollow);
+  const handle = await open(path, constants.O_RDWR | noFollow | (constants.O_NONBLOCK ?? 0));
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size > 150_000) {
@@ -102,8 +117,13 @@ export async function writeRegularFile(path: string, content: string, overwrite:
     await handle.sync();
   } finally { await handle.close(); }
 }
-export async function deleteRegularFile(path: string, expectedCurrentSha256: string): Promise<void> {
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+
+export async function writeRegularFile(path: string, content: string, overwrite: boolean, expectedCurrentSha256: string | null): Promise<void> {
+  return withPathLock(path, () => writeRegularFileUnlocked(path, content, overwrite, expectedCurrentSha256));
+}
+
+async function deleteRegularFileUnlocked(path: string, expectedCurrentSha256: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   let identity: { dev: number; ino: number };
   try {
     const info = await handle.stat();
@@ -127,4 +147,8 @@ export async function deleteRegularFile(path: string, expectedCurrentSha256: str
   const latest = await lstat(path);
   if (latest.isSymbolicLink() || !latest.isFile() || latest.dev !== identity.dev || latest.ino !== identity.ino) throw new Error("Target identity changed after preflight; deletion was refused.");
   await unlink(path);
+}
+
+export async function deleteRegularFile(path: string, expectedCurrentSha256: string): Promise<void> {
+  return withPathLock(path, () => deleteRegularFileUnlocked(path, expectedCurrentSha256));
 }

@@ -100,7 +100,7 @@ export class PreflightTicketStore {
     this.#prune(now);
     if (this.#tickets.size >= 256) throw new Error("Preflight ticket capacity reached; wait for existing tickets to expire.");
     const token = randomBytes(24).toString("hex");
-    this.#tickets.set(token, { ...ticket, expiresAt: now + 5 * 60_000 });
+    this.#tickets.set(token, { ...ticket, findings: ticket.findings.map(finding => ({ ...finding })), expiresAt: now + 5 * 60_000 });
     return token;
   }
 
@@ -124,7 +124,7 @@ export class PreflightTicketStore {
       return null;
     }
 
-    return ticket;
+    return { ...ticket, findings: ticket.findings.map(finding => ({ ...finding })) };
   }
 
   #prune(now: number): void {

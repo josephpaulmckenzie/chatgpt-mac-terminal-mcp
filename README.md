@@ -2,20 +2,24 @@
 
 A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects ChatGPT to a deliberately scoped set of developer tools on a Mac. This project packages the implementation used for the original Collectors Vault Mac Terminal connection and makes its repository scope configurable for other projects.
 
-The server exposes ten tools:
+The server exposes twelve tools:
 
 - `git_status`
 - `git_branches`
 - `git_log`
 - `search_code`
 - `read_file`
-- `write_file` (repository-scoped text-file creation and updates)
-- `delete_file` (explicitly confirmed, repository-scoped regular-file deletion)
-- `git_diff` (inspect staged or unstaged changes, optionally for one path)
+- `preview_write` (read-only content scan and hash-bound approval ticket)
+- `write_file` (requires a matching, one-use `preview_write` ticket)
+- `preview_delete` (read-only file hash and approval ticket)
+- `delete_file` (requires a matching, one-use `preview_delete` ticket)
 - `run_npm_script`
 - `run_command`
+- `git_diff`
 
-The command runner is intentionally allowlisted. It is not a general-purpose remote shell. `write_file` permits text-file creation and updates only inside the selected repository; it rejects sensitive paths, symlinks, and paths outside the repository. New files are created by default; updating an existing file requires `overwrite=true`. `delete_file` requires `confirm=true` and only removes one regular file; it rejects directories, symlinks, sensitive paths, and paths outside the repository. `git_diff` is read-only and can show staged or unstaged changes. Keep these boundaries unless you have designed, reviewed, and tested a separate permission model.
+Every write and deletion must first pass its matching preflight tool. Write preflight scans proposed content for likely names, email addresses, phone numbers, street addresses, local filesystem paths, AWS access keys, GitHub tokens, and private-key markers. Sensitive values are redacted in findings. Possible names are treated as review candidates, not verified identities. A preflight ticket expires after five minutes, is single-use, and is bound to the exact repository, path, operation, and SHA-256 hashes of the current and proposed content. Changes between preview and execution invalidate the ticket. Findings require explicit acknowledgement on the write call. These checks are heuristics, not a guarantee that all sensitive information will be detected.
+
+The command runner is intentionally allowlisted. It is not a general-purpose remote shell. `write_file` and `delete_file` reject sensitive paths and symlinks, and use no-follow file handles plus descriptor-based identity/content checks. Node's standard filesystem API does not provide a fully race-free directory-descriptor-relative unlink operation, so a hostile process concurrently replacing parent directories remains outside the guarantee. New files are created exclusively with restrictive permissions; updating an existing file requires `overwrite=true`. `read_file` rejects symlinks in every path component and caps reads at the output limit. `search_code` and `git_diff` exclude common credential directories, environment files, and key/certificate files (case-insensitively); `git_diff` also rejects explicitly requested sensitive paths. `run_npm_script` executes repository-defined code: only use it in repositories you trust. It passes `--ignore-scripts` to prevent npm pre/post lifecycle hooks, but the explicitly selected script itself is not sandboxed.
 
 ## Architecture
 
@@ -63,7 +67,7 @@ Set these environment variables in the local tunnel profile or in the wrapper th
 
 ```text
 REPO=/absolute/path/to/your/default/project
-ALLOWED_REPOS=collectors-vault=/Users/your-user/Documents/Code/collectors-vault;mac-terminal-mcp=/Users/your-user/Documents/Code/chatgpt-mac-terminal-mcp
+ALLOWED_REPOS=collectors-vault=/path/to/collectors-vault;mac-terminal-mcp=/path/to/chatgpt-mac-terminal-mcp
 MCP_SERVER_NAME=mac-terminal
 COMMAND_CENTER_LOG=/tmp/chatgpt-mac-terminal-command-center.log
 ALLOWED_NPM_SCRIPTS=build,test,typecheck
@@ -164,8 +168,7 @@ Before using or sharing a connection:
 - [ ] `REPO` points only to the intended project directory.
 - [ ] File access rejects paths outside the repository.
 - [ ] Shell commands are allowlisted and argument handling is reviewed.
-- [ ] File writes and deletions are limited to repository-relative regular files; sensitive paths and symlinks are rejected.
-- [ ] File deletion requires explicit `confirm=true` and cannot remove directories.
+- [ ] File writes and deletions require one-use preflight tickets; repository-relative regular files only; sensitive paths and symlinks are rejected.
 - [ ] npm scripts are limited by `ALLOWED_NPM_SCRIPTS`.
 - [ ] Output limits and execution timeouts are enabled.
 - [ ] Every exposed tool is understood and tested.

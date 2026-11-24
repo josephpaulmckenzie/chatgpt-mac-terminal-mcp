@@ -11,6 +11,9 @@ const marker = "MCP_INTEGRATION_SENTINEL_7F3A";
 const root = await mkdtemp(join(tmpdir(), "mac-terminal-mcp-it-"));
 const repo = join(root, "repo");
 const outside = join(root, "outside.txt");
+const bareRemote = join(root, "remote.git");
+const remoteWork = join(root, "remote-work");
+let branchName;
 let client;
 
 const output = result => (result.content ?? []).filter(x => x.type === "text").map(x => x.text).join("\n");
@@ -70,6 +73,13 @@ before(async () => {
   execFileSync("git", ["config", "user.name", "MCP Integration"], { cwd: repo });
   execFileSync("git", ["add", "-A"], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "integration fixture"], { cwd: repo });
+  branchName = execFileSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).trim();
+  execFileSync("git", ["init", "--bare", "-q", bareRemote]);
+  execFileSync("git", ["remote", "add", "origin", bareRemote], { cwd: repo });
+  execFileSync("git", ["push", "-q", "-u", "origin", branchName], { cwd: repo });
+  execFileSync("git", ["clone", "-q", bareRemote, remoteWork]);
+  execFileSync("git", ["config", "user.email", "mcp-test-at-example.invalid"], { cwd: remoteWork });
+  execFileSync("git", ["config", "user.name", "MCP Integration"], { cwd: remoteWork });
 
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -93,9 +103,72 @@ after(async () => {
 
 test("registers expected MCP tools", async () => {
   const names = new Set((await client.listTools()).tools.map(tool => tool.name));
-  for (const name of ["search_code", "read_file", "preview_write", "write_file", "preview_delete", "delete_file", "run_npm_script", "run_command"]) {
+  for (const name of ["git_sync", "search_code", "read_file", "preview_write", "write_file", "preview_delete", "delete_file", "run_npm_script", "run_command"]) {
     assert.ok(names.has(name), "missing " + name);
   }
+});
+
+
+test("git_sync requires explicit confirmation", async () => {
+  assert.equal((await client.callTool({ name: "git_sync", arguments: {} })).isError, true);
+});
+
+test("git_sync fast-forwards and verifies the upstream commit", async () => {
+  await writeFile(join(remoteWork, "remote-update.txt"), "upstream change");
+  execFileSync("git", ["add", "remote-update.txt"], { cwd: remoteWork });
+  execFileSync("git", ["commit", "-qm", "upstream update"], { cwd: remoteWork });
+  execFileSync("git", ["push", "-q", "origin", branchName], { cwd: remoteWork });
+  const result = await client.callTool({ name: "git_sync", arguments: { confirm: true } });
+  assert.notEqual(result.isError, true, output(result));
+  const value = JSON.parse(output(result));
+  assert.equal(value.action, "fast-forwarded");
+  assert.equal(value.commitsFastForwarded, 1);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(), execFileSync("git", ["rev-parse", "origin/" + branchName], { cwd: repo, encoding: "utf8" }).trim());
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).trim(), "");
+});
+
+test("git_sync reports already-up-to-date", async () => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const result = await client.callTool({ name: "git_sync", arguments: { confirm: true } });
+  assert.notEqual(result.isError, true, output(result));
+  assert.equal(JSON.parse(output(result)).action, "already-up-to-date");
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(), head);
+});
+
+test("git_sync refuses tracked and untracked changes", async () => {
+  await writeFile(join(repo, "public.txt"), "dirty tracked change");
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /not clean/i);
+  execFileSync("git", ["checkout", "--", "public.txt"], { cwd: repo });
+  await writeFile(join(repo, "untracked-sync-test.txt"), "untracked");
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /not clean/i);
+  await rm(join(repo, "untracked-sync-test.txt"));
+});
+
+test("git_sync refuses ahead and divergent histories", async () => {
+  await writeFile(join(repo, "local-only.txt"), "local commit");
+  execFileSync("git", ["add", "local-only.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "local-only commit"], { cwd: repo });
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /ahead of upstream/i);
+  execFileSync("git", ["reset", "--hard", "origin/" + branchName], { cwd: repo });
+  await writeFile(join(repo, "local-divergent.txt"), "local side");
+  execFileSync("git", ["add", "local-divergent.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "local divergent commit"], { cwd: repo });
+  await writeFile(join(remoteWork, "remote-divergent.txt"), "remote side");
+  execFileSync("git", ["add", "remote-divergent.txt"], { cwd: remoteWork });
+  execFileSync("git", ["commit", "-qm", "remote divergent commit"], { cwd: remoteWork });
+  execFileSync("git", ["push", "-q", "origin", branchName], { cwd: remoteWork });
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /diverged/i);
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).trim(), "");
+  execFileSync("git", ["reset", "--hard", "origin/" + branchName], { cwd: repo });
+});
+
+test("git_sync refuses missing upstream and detached HEAD", async () => {
+  execFileSync("git", ["branch", "--unset-upstream"], { cwd: repo });
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /no upstream configured|no configured upstream/i);
+  execFileSync("git", ["branch", "--set-upstream-to=origin/" + branchName], { cwd: repo });
+  execFileSync("git", ["checkout", "--detach", "HEAD"], { cwd: repo });
+  assertError(await client.callTool({ name: "git_sync", arguments: { confirm: true } }), /detached HEAD/i);
+  execFileSync("git", ["checkout", "-q", branchName], { cwd: repo });
 });
 
 test("search excludes root and nested credential paths while returning public source", async () => {

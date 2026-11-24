@@ -663,5 +663,90 @@ server.tool(
 );
 
 
+async function runGit(args: string[], cwd: string): Promise<string> {
+  return await new Promise<string>((resolveGit, rejectGit) => {
+    const child = spawn("git", args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+    }, 120_000);
+    const append = (chunk: Buffer): void => {
+      if (output.length < 100_000) output += chunk.toString("utf8").slice(0, 100_000 - output.length);
+    };
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) rejectGit(error);
+      else resolveGit(output.trim());
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.once("error", error => finish(error));
+    child.once("close", code => {
+      if (timedOut) return finish(new Error("Git command timed out."));
+      if (code !== 0) return finish(new Error("Git command failed (exit " + (code ?? 1) + "): " + output.trim()));
+      finish();
+    });
+  });
+}
+
+server.tool(
+  "git_sync",
+  "Safely fast-forward the current branch from its configured remote upstream. Requires confirm=true and a clean working tree; refuses ahead, divergent, detached, or upstream-less branches.",
+  { confirm: z.literal(true), repository: z.string().default("default") },
+  async ({ repository }) => {
+    try {
+      const repo = await getRepository(repository);
+      const initialStatus = await runGit(["status", "--porcelain=v1", "--untracked-files=all"], repo);
+      if (initialStatus) throw new Error("Working tree is not clean. Commit, stash, or remove changes before syncing.");
+      const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], repo);
+      if (!branch || branch === "HEAD") throw new Error("Cannot sync from a detached HEAD. Check out a local branch first.");
+      const upstream = await runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], repo);
+      if (!upstream) throw new Error("Current branch has no configured upstream.");
+      const remote = await runGit(["config", "--get", "branch." + branch + ".remote"], repo);
+      if (!remote || remote === ".") throw new Error("The configured upstream is not backed by a fetchable remote.");
+      await runGit(["fetch", "--no-tags", remote], repo);
+      if (await runGit(["status", "--porcelain=v1", "--untracked-files=all"], repo)) {
+        throw new Error("Working tree changed during fetch. No merge was attempted; inspect the repository before retrying.");
+      }
+      if (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], repo) !== branch) {
+        throw new Error("Checked-out branch changed during fetch. No merge was attempted.");
+      }
+      const counts = await runGit(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], repo);
+      const match = counts.match(/^(\d+)\s+(\d+)$/);
+      if (!match) throw new Error("Could not determine local/upstream commit distance.");
+      const ahead = Number(match[1]);
+      const behind = Number(match[2]);
+      if (ahead > 0 && behind > 0) throw new Error("Local and upstream branches have diverged (ahead " + ahead + ", behind " + behind + "). Automatic sync is refused.");
+      if (ahead > 0) throw new Error("Local branch is ahead of upstream by " + ahead + " commit(s). Nothing was changed.");
+      let action = "already-up-to-date";
+      if (behind > 0) {
+        await runGit(["merge", "--ff-only", "@{upstream}"], repo);
+        action = "fast-forwarded";
+      }
+      if (await runGit(["status", "--porcelain=v1", "--untracked-files=all"], repo)) {
+        throw new Error("Post-sync verification found working-tree changes. Inspect the repository immediately.");
+      }
+      const [head, upstreamHead] = await Promise.all([
+        runGit(["rev-parse", "HEAD"], repo),
+        runGit(["rev-parse", "@{upstream}"], repo)
+      ]);
+      if (head !== upstreamHead) throw new Error("Post-sync verification failed: HEAD does not match the upstream commit.");
+      return { content: [{ type: "text", text: JSON.stringify({
+        success: true, action, branch, upstream, fetchedRemote: remote,
+        commitsFastForwarded: behind, head, workingTree: "clean"
+      }, null, 2) }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: String(error instanceof Error ? error.message : error) }] };
+    }
+  }
+);
+
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

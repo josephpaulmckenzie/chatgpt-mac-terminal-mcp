@@ -7,7 +7,7 @@ This guide follows OpenAI's current custom MCP connection flow. Menu availabilit
 - Build and start the local MCP server through your Secure MCP Tunnel profile.
 - Confirm the profile passes the required `REPO` environment variable and optional `ALLOWED_REPOS` environment variable to the MCP process.
 - Confirm the tunnel is available to the target ChatGPT workspace.
-- Review the twelve tools and their permission boundaries before connecting. Writes and deletions require a preflight preview and a short-lived one-use token.
+- Review the thirteen tools and their permission boundaries before connecting. Writes and deletions require a preflight preview and a short-lived one-use token.
 
 ## In ChatGPT
 

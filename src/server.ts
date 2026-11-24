@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFile, realpath, lstat, writeFile } from "node:fs/promises";
+import { readFile, realpath, lstat, writeFile, unlink } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -314,6 +314,50 @@ async function safeWritePath(repository: string, relativePath: string): Promise<
   return candidate;
 }
 
+
+async function safeDeletePath(repository: string, relativePath: string): Promise<string> {
+  if (relativePath.trim().length === 0 || isAbsolute(relativePath)) {
+    throw new Error("A non-empty repository-relative file path is required.");
+  }
+
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  const lowerSegments = segments.map(segment => segment.toLowerCase());
+  const blockedSegments = new Set([".git", "node_modules", ".aws", ".ssh", "secret", "secrets"]);
+  const leaf = lowerSegments.at(-1) ?? "";
+
+  if (
+    segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
+    lowerSegments.some(segment => blockedSegments.has(segment) || segment === ".env" || segment.startsWith(".env.")) ||
+    [".pem", ".key", ".p12", ".pfx"].some(extension => leaf.endsWith(extension))
+  ) {
+    throw new Error("Deleting sensitive or protected paths is prohibited.");
+  }
+
+  const root = await realpath(repository);
+  const candidate = resolve(root, ...segments);
+  if (candidate === root || !candidate.startsWith(root + sep)) {
+    throw new Error("Deleting the repository root or files outside the repository is prohibited.");
+  }
+
+  const parent = await realpath(resolve(candidate, ".."));
+  if (parent !== root && !parent.startsWith(root + sep)) {
+    throw new Error("Deleting files outside the repository is prohibited.");
+  }
+
+  const target = await lstat(candidate);
+  if (target.isSymbolicLink() || !target.isFile()) {
+    throw new Error("Only regular files may be deleted; symbolic links and directories are prohibited.");
+  }
+
+  const resolvedTarget = await realpath(candidate);
+  if (resolvedTarget !== root && !resolvedTarget.startsWith(root + sep)) {
+    throw new Error("Deleting files outside the repository is prohibited.");
+  }
+
+  return candidate;
+}
+
 const server = new McpServer({
   name: SERVER_NAME,
   version: "1.0.0"
@@ -436,6 +480,70 @@ server.tool(
   }
 );
 
+
+server.tool(
+  "delete_file",
+  "Delete one regular file inside the selected repository. Requires confirm=true. Rejects directories, symlinks, sensitive paths, and paths outside the repository.",
+  {
+    path: z.string().trim().min(1).max(500),
+    confirm: z.literal(true),
+    repository: z.string().default("default")
+  },
+  async ({ path, repository }) => {
+    try {
+      const target = await safeDeletePath(await getRepository(repository), path);
+      await unlink(target);
+      return {
+        content: [{
+          type: "text",
+          text: "Deleted " + path + "."
+        }]
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(error) }]
+      };
+    }
+  }
+);
+
+server.tool(
+  "git_diff",
+  "Show the unstaged or staged Git diff for the selected repository, optionally limited to one repository-relative path.",
+  {
+    staged: z.boolean().default(false),
+    path: z.string().trim().min(1).max(500).optional(),
+    repository: z.string().default("default")
+  },
+  async ({ staged, path, repository }) => {
+    const args = ["diff", "--no-ext-diff", "--no-color"];
+    if (staged) args.push("--cached");
+    if (path !== undefined) {
+      const normalized = path.replaceAll("\\", "/");
+      const segments = normalized.split("/");
+      if (
+        isAbsolute(path) ||
+        segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
+        /[\u0000-\u001f]/.test(path)
+      ) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Diff path must be a safe repository-relative path." }]
+        };
+      }
+      args.push("--", path);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: await run("git", args, 30_000, await getRepository(repository))
+      }]
+    };
+  }
+);
+
 server.tool(
   "run_npm_script",
   "Run one npm script explicitly included in ALLOWED_NPM_SCRIPTS for the configured repository.",
@@ -507,6 +615,7 @@ server.tool(
       ["git", "log", "-5", "--oneline"],
       ["git", "branch", "--all", "--no-color"],
       ["git", "diff", "--stat"],
+      ["git", "diff", "--check"],
       ["git", "diff", "--name-only"],
       ["git", "rev-parse", "--show-toplevel"],
     ];

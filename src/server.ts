@@ -3,8 +3,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFile, realpath, lstat, writeFile, unlink } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+import { PreflightTicketStore, scanSensitiveContent, sha256Text } from "./writePreflight.js";
+import { deleteRegularFile, isProtectedRepositoryPath, readRegularFile, resolveRepositoryFile, writeRegularFile } from "./fileSafety.js";
 import { tmpdir } from "node:os";
 
 const repoValue = process.env.REPO?.trim();
@@ -50,6 +52,16 @@ if (configuredNpmScripts.some(script => !/^[a-zA-Z0-9:_-]+$/.test(script))) {
 
 const allowedNpmScripts = new Set(configuredNpmScripts);
 const MAX_OUTPUT = 150_000;
+const preflightTickets = new PreflightTicketStore();
+
+async function currentFileSha256(path: string): Promise<string | null> {
+  try {
+    return sha256Text(await readRegularFile(path, MAX_OUTPUT));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
 
 
 const commandCenterLog = createWriteStream(
@@ -254,110 +266,6 @@ async function run(
   });
 }
 
-async function safePath(repository: string, relativePath: string): Promise<string> {
-  const root = await realpath(repository);
-  const candidate = await realpath(resolve(root, relativePath));
-
-  if (candidate !== root && !candidate.startsWith(root + sep)) {
-    throw new Error("Access outside the repository is prohibited.");
-  }
-
-  const normalized = relativePath.replaceAll("\\", "/");
-  const blocked = /(^|\/)(\.env($|\.)|\.aws|\.ssh|secrets?)(\/|$)|\.(pem|key)$/i;
-
-  if (blocked.test(normalized)) {
-    throw new Error("Access to sensitive files is prohibited.");
-  }
-
-  return candidate;
-}
-
-async function safeWritePath(repository: string, relativePath: string): Promise<string> {
-  if (relativePath.trim().length === 0 || isAbsolute(relativePath)) {
-    throw new Error("A non-empty repository-relative path is required.");
-  }
-
-  const normalized = relativePath.replaceAll("\\", "/");
-  const segments = normalized.split("/");
-  const lowerSegments = segments.map(segment => segment.toLowerCase());
-  const blockedSegments = new Set([".git", "node_modules", ".aws", ".ssh", "secret", "secrets"]);
-  const leaf = lowerSegments.at(-1) ?? "";
-  if (
-    segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
-    lowerSegments.some(segment => blockedSegments.has(segment) || segment === ".env" || segment.startsWith(".env.")) ||
-    [".pem", ".key", ".p12", ".pfx"].some(extension => leaf.endsWith(extension))
-  ) {
-    throw new Error("Writing to sensitive or non-repository paths is prohibited.");
-  }
-
-  const root = await realpath(repository);
-  const candidate = resolve(root, ...segments);
-  if (candidate !== root && !candidate.startsWith(root + sep)) {
-    throw new Error("Writing outside the repository is prohibited.");
-  }
-
-  const parent = await realpath(resolve(candidate, ".."));
-  if (parent !== root && !parent.startsWith(root + sep)) {
-    throw new Error("Writing outside the repository is prohibited.");
-  }
-
-  try {
-    const target = await lstat(candidate);
-    if (target.isSymbolicLink() || !target.isFile()) {
-      throw new Error("Only regular files may be updated; symbolic links and directories are prohibited.");
-    }
-    await realpath(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-
-  return candidate;
-}
-
-
-async function safeDeletePath(repository: string, relativePath: string): Promise<string> {
-  if (relativePath.trim().length === 0 || isAbsolute(relativePath)) {
-    throw new Error("A non-empty repository-relative file path is required.");
-  }
-
-  const normalized = relativePath.replaceAll("\\", "/");
-  const segments = normalized.split("/");
-  const lowerSegments = segments.map(segment => segment.toLowerCase());
-  const blockedSegments = new Set([".git", "node_modules", ".aws", ".ssh", "secret", "secrets"]);
-  const leaf = lowerSegments.at(-1) ?? "";
-
-  if (
-    segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
-    lowerSegments.some(segment => blockedSegments.has(segment) || segment === ".env" || segment.startsWith(".env.")) ||
-    [".pem", ".key", ".p12", ".pfx"].some(extension => leaf.endsWith(extension))
-  ) {
-    throw new Error("Deleting sensitive or protected paths is prohibited.");
-  }
-
-  const root = await realpath(repository);
-  const candidate = resolve(root, ...segments);
-  if (candidate === root || !candidate.startsWith(root + sep)) {
-    throw new Error("Deleting the repository root or files outside the repository is prohibited.");
-  }
-
-  const parent = await realpath(resolve(candidate, ".."));
-  if (parent !== root && !parent.startsWith(root + sep)) {
-    throw new Error("Deleting files outside the repository is prohibited.");
-  }
-
-  const target = await lstat(candidate);
-  if (target.isSymbolicLink() || !target.isFile()) {
-    throw new Error("Only regular files may be deleted; symbolic links and directories are prohibited.");
-  }
-
-  const resolvedTarget = await realpath(candidate);
-  if (resolvedTarget !== root && !resolvedTarget.startsWith(root + sep)) {
-    throw new Error("Deleting files outside the repository is prohibited.");
-  }
-
-  return candidate;
-}
-
 const server = new McpServer({
   name: SERVER_NAME,
   version: "1.0.0"
@@ -412,10 +320,10 @@ server.tool(
       type: "text",
       text: await run("git", [
         "grep", "-n", "-I", "-E", query, "--", ".",
-        ":(exclude).env",
-        ":(exclude).env.*",
-        ":(exclude)**/*.pem",
-        ":(exclude)**/*secret*"
+        ":(exclude,icase,glob)**/.env", ":(exclude,icase,glob)**/.env.*",
+        ":(exclude,icase,glob)**/.aws/**", ":(exclude,icase,glob)**/.ssh/**",
+        ":(exclude,icase,glob)**/*.pem", ":(exclude,icase,glob)**/*.key", ":(exclude,icase,glob)**/*.p12", ":(exclude,icase,glob)**/*.pfx",
+        ":(exclude,icase,glob)**/*secret*", ":(exclude,icase,glob)**/*credential*"
       ], 30_000, await getRepository(repository))
     }]
   })
@@ -427,8 +335,8 @@ server.tool(
   { path: z.string().min(1).max(500), repository: z.string().default("default") },
   async ({ path, repository }) => {
     try {
-      const file = await safePath(await getRepository(repository), path);
-      const content = await readFile(file, "utf8");
+      const file = await resolveRepositoryFile(await getRepository(repository), path);
+      const content = (await readRegularFile(file, MAX_OUTPUT)).toString("utf8");
 
       return {
         content: [{
@@ -449,8 +357,8 @@ server.tool(
 );
 
 server.tool(
-  "write_file",
-  "Create or update a regular text file inside the selected repository. Sensitive paths, symlinks, and paths outside the repository are rejected. Existing files require overwrite=true.",
+  "preview_write",
+  "Read-only preflight for a proposed write. Reports file hashes and possible sensitive content. Returns a short-lived token required by write_file.",
   {
     path: z.string().trim().min(1).max(500),
     content: z.string().max(MAX_OUTPUT),
@@ -459,58 +367,151 @@ server.tool(
   },
   async ({ path, content, overwrite, repository }) => {
     try {
-      const target = await safeWritePath(await getRepository(repository), path);
+      const repo = await getRepository(repository);
+      const target = await resolveRepositoryFile(repo, path, true);
+      const currentSha256 = await currentFileSha256(target);
+      if (currentSha256 !== null && !overwrite) {
+        throw new Error("Target exists; set overwrite=true to preview an overwrite.");
+      }
+      const proposedSha256 = sha256Text(content);
+      const findings = scanSensitiveContent(content);
+      const preflightToken = preflightTickets.issue({
+        operation: "write", repository: repo, path, overwrite,
+        currentSha256, proposedSha256, findings
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            operation: "write", repository, path, overwrite,
+            currentSha256, proposedSha256,
+            bytes: Buffer.byteLength(content, "utf8"),
+            findings, reviewRequired: findings.length > 0,
+            preflightToken, tokenExpiresInSeconds: 300
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: String(error) }] };
+    }
+  }
+);
+
+server.tool(
+  "write_file",
+  "Create or update a regular file only after preview_write. The one-use token binds the exact repository, path, content hash, and current file hash.",
+  {
+    path: z.string().trim().min(1).max(500),
+    content: z.string().max(MAX_OUTPUT),
+    overwrite: z.boolean().default(false),
+    preflightToken: z.string().min(1).max(100),
+    acknowledgeFindings: z.boolean().default(false),
+    repository: z.string().default("default")
+  },
+  async ({ path, content, overwrite, preflightToken, acknowledgeFindings, repository }) => {
+    try {
+      const repo = await getRepository(repository);
+      const target = await resolveRepositoryFile(repo, path, true);
+      const currentSha256 = await currentFileSha256(target);
+      const proposedSha256 = sha256Text(content);
+      const ticket = preflightTickets.consume(preflightToken, {
+        operation: "write", repository: repo, path, overwrite,
+        currentSha256, proposedSha256
+      });
+      if (!ticket) {
+        throw new Error("Preflight missing, expired, already used, or file/payload changed. Run preview_write again.");
+      }
+      if (ticket.findings.length > 0 && !acknowledgeFindings) {
+        throw new Error("Preflight found possible personal or sensitive data. Review findings and explicitly acknowledge them.");
+      }
       if (!overwrite) {
-        await writeFile(target, content, { encoding: "utf8", flag: "wx" });
+        await writeRegularFile(target, content, false, null);
       } else {
-        await writeFile(target, content, { encoding: "utf8", flag: "w" });
+        await writeRegularFile(target, content, true, currentSha256);
       }
       return {
         content: [{
           type: "text",
-          text: (overwrite ? "Updated " : "Created ") + path + " (" + Buffer.byteLength(content, "utf8") + " bytes)."
+          text: (overwrite ? "Updated " : "Created ") + path + " (" + Buffer.byteLength(content, "utf8") + " bytes; preflight verified)."
         }]
       };
     } catch (error) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: String(error) }]
-      };
+      return { isError: true, content: [{ type: "text", text: String(error) }] };
     }
   }
 );
 
 
 server.tool(
-  "delete_file",
-  "Delete one regular file inside the selected repository. Requires confirm=true. Rejects directories, symlinks, sensitive paths, and paths outside the repository.",
+  "preview_delete",
+  "Read-only preflight for deleting a regular file. Reports its SHA-256 and returns a short-lived token required by delete_file.",
   {
     path: z.string().trim().min(1).max(500),
-    confirm: z.literal(true),
     repository: z.string().default("default")
   },
   async ({ path, repository }) => {
     try {
-      const target = await safeDeletePath(await getRepository(repository), path);
-      await unlink(target);
+      const repo = await getRepository(repository);
+      const target = await resolveRepositoryFile(repo, path);
+      const currentSha256 = await currentFileSha256(target);
+      if (currentSha256 === null) throw new Error("Target no longer exists.");
+      const preflightToken = preflightTickets.issue({
+        operation: "delete", repository: repo, path, overwrite: false,
+        currentSha256, proposedSha256: null, findings: []
+      });
       return {
         content: [{
           type: "text",
-          text: "Deleted " + path + "."
+          text: JSON.stringify({
+            operation: "delete", repository, path, currentSha256,
+            preflightToken, tokenExpiresInSeconds: 300
+          }, null, 2)
         }]
       };
     } catch (error) {
+      return { isError: true, content: [{ type: "text", text: String(error) }] };
+    }
+  }
+);
+
+server.tool(
+  "delete_file",
+  "Delete one regular file only after preview_delete. Requires confirm=true and a one-use token bound to the current file hash.",
+  {
+    path: z.string().trim().min(1).max(500),
+    confirm: z.literal(true),
+    preflightToken: z.string().min(1).max(100),
+    repository: z.string().default("default")
+  },
+  async ({ path, preflightToken, repository }) => {
+    try {
+      const repo = await getRepository(repository);
+      const target = await resolveRepositoryFile(repo, path);
+      const currentSha256 = await currentFileSha256(target);
+      const ticket = preflightTickets.consume(preflightToken, {
+        operation: "delete", repository: repo, path, overwrite: false,
+        currentSha256, proposedSha256: null
+      });
+      if (!ticket) {
+        throw new Error("Preflight missing, expired, already used, or file changed. Run preview_delete again.");
+      }
+      if (currentSha256 === null) throw new Error("Target no longer exists.");
+      await deleteRegularFile(target, currentSha256);
       return {
-        isError: true,
-        content: [{ type: "text", text: String(error) }]
+        content: [{
+          type: "text",
+          text: "Deleted " + path + " (preflight verified)."
+        }]
       };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: String(error) }] };
     }
   }
 );
 
 server.tool(
   "git_diff",
-  "Show the unstaged or staged Git diff for the selected repository, optionally limited to one repository-relative path.",
+  "Show Git changes while excluding credential files and sensitive paths. An explicitly selected sensitive path is rejected.",
   {
     staged: z.boolean().default(false),
     path: z.string().trim().min(1).max(500).optional(),
@@ -519,20 +520,36 @@ server.tool(
   async ({ staged, path, repository }) => {
     const args = ["diff", "--no-ext-diff", "--no-color"];
     if (staged) args.push("--cached");
+    const exclusions = [
+      ":(exclude,icase,glob)**/.env",
+      ":(exclude,icase,glob)**/.env.*",
+      ":(exclude,icase,glob)**/.aws/**",
+      ":(exclude,icase,glob)**/.ssh/**",
+      ":(exclude,icase,glob)**/*.pem",
+      ":(exclude,icase,glob)**/*.key",
+      ":(exclude,icase,glob)**/*.p12",
+      ":(exclude,icase,glob)**/*.pfx",
+      ":(exclude,icase,glob)**/*secret*",
+      ":(exclude,icase,glob)**/*credential*"
+    ];
     if (path !== undefined) {
       const normalized = path.replaceAll("\\", "/");
       const segments = normalized.split("/");
       if (
         isAbsolute(path) ||
         segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
-        /[\u0000-\u001f]/.test(path)
+        /[\u0000-\u001f]/.test(path) ||
+        path.startsWith(":") ||
+        isProtectedRepositoryPath(normalized)
       ) {
         return {
           isError: true,
-          content: [{ type: "text", text: "Diff path must be a safe repository-relative path." }]
+          content: [{ type: "text", text: "Diff path must be a safe, non-sensitive repository-relative path." }]
         };
       }
-      args.push("--", path);
+      args.push("--", ":(literal)" + normalized, ...exclusions);
+    } else {
+      args.push("--", ".", ...exclusions);
     }
 
     return {
@@ -580,7 +597,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: await run("npm", ["run", script], 600_000, repo)
+        text: await run("npm", ["--ignore-scripts", "run", script], 600_000, repo)
       }]
     };
   }

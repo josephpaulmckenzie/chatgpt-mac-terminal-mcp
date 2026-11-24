@@ -98,7 +98,7 @@ test("personal information is informational, not a high-risk write blocker", () 
     "Author: Michael Scott",
     "Contact: michael.scott@dundermifflin.com",
     "Path: /Users/example/Documents/project"
-  ].join("\\n"));
+  ].join("\n"));
   assert.ok(findings.length >= 3);
   assert.equal(findings.some(isHighRiskFinding), false);
 });
@@ -107,8 +107,9 @@ test("credential and private-key findings remain high risk", () => {
   const awsKey = ["AKIA", "1234567890ABCDEF"].join("");
   const token = ["ghp_", "abcdefghijklmnopqrstuvwxyz123456"].join("");
   const keyMarker = ["-----BEGIN ", "PRIVATE KEY", "-----"].join("");
-  const findings = scanSensitiveContent([awsKey, token, keyMarker].join("\\n"));
-  assert.equal(findings.filter(isHighRiskFinding).length, 2);
-  assert.ok(findings.some(finding => finding.category === "aws_access_key"));
-  assert.ok(findings.some(finding => finding.category === "private_key"));
+  const findings = scanSensitiveContent([awsKey, token, keyMarker].join("\n"));
+  assert.deepEqual(
+    findings.filter(isHighRiskFinding).map(finding => finding.category).sort(),
+    ["aws_access_key", "github_token", "private_key"]
+  );
 });

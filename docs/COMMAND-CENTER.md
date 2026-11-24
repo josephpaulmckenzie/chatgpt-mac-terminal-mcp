@@ -1,23 +1,38 @@
 # Command Center
 
-The Command Center is a local text dashboard for commands invoked through the MCP server. It writes the header, streamed process output, and completion summary to the path configured by `COMMAND_CENTER_LOG`.
+The Command Center is a local text dashboard for commands invoked through the MCP server. It writes the command header, streamed process output, and completion summary to the path configured by COMMAND_CENTER_LOG.
 
-On macOS, the default is:
+## Install the bundled viewer
 
-```text
-/tmp/chatgpt-mac-terminal-command-center.log
-```
+From the repository root, install the viewer in ~/bin:
 
-Start a viewer in a second Terminal window:
+    mkdir -p "$HOME/bin"
+    install -m 755 scripts/cv-command-center "$HOME/bin/cv-command-center"
 
-```bash
-LOG_FILE="${COMMAND_CENTER_LOG:-/tmp/chatgpt-mac-terminal-command-center.log}"
-touch "$LOG_FILE"
-tail -n 0 -f "$LOG_FILE"
-```
+Start it in a second Terminal window:
 
-The first Terminal window runs the tunnel. The second displays the dashboard. When the tunnel starts the MCP server as a stdio process, tool output is written to the shared local log file.
+    "$HOME/bin/cv-command-center"
 
-The dashboard reports the command, start time, result, exit code, elapsed time, and parsed test counts when available. It does not change the underlying command permissions or grant additional access.
+The viewer defaults to /tmp/chatgpt-mac-terminal-command-center.log. Override it by setting COMMAND_CENTER_LOG before launching the viewer.
 
-To stop the viewer, press `Control-C` in the second Terminal window. The tunnel and MCP server continue running.
+## Keep the tunnel and viewer on the same log path
+
+The MCP server and viewer must use the exact same COMMAND_CENTER_LOG value. Configure the tunnel profile to pass this environment variable to the MCP server:
+
+    COMMAND_CENTER_LOG=/tmp/chatgpt-mac-terminal-command-center.log
+
+If you launch the tunnel manually from a shell, export the variable before starting the tunnel:
+
+    export COMMAND_CENTER_LOG="/tmp/chatgpt-mac-terminal-command-center.log"
+    # Start the tunnel with your normal tunnel command.
+
+Do not assume Node.js temporary-directory defaults to /tmp on macOS. Setting the explicit path on both sides avoids the viewer watching a different file.
+
+## Normal operation
+
+- Terminal window 1 runs the secure tunnel and MCP server.
+- Terminal window 2 runs cv-command-center and displays the dashboard.
+- When ChatGPT invokes an MCP command, the viewer displays the command, live output, result, exit code, and elapsed time.
+- Press Control-C in the viewer window to stop only the viewer. The tunnel and MCP server continue running.
+
+The dashboard is a local log viewer. It does not change command permissions, expand the command allowlist, or grant additional access. The log file itself is local and should not be committed.

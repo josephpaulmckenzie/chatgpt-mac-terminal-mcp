@@ -122,21 +122,22 @@ Only connect a server you control. Review the tools and permissions before enabl
 
 ## 7. Enable the Command Center log viewer
 
-The default log file on macOS is:
+The repository includes a reusable viewer script at `scripts/cv-command-center`. From the repository root, install it once:
 
-```text
-/tmp/chatgpt-mac-terminal-command-center.log
-```
+    mkdir -p "$HOME/bin"
+    install -m 755 scripts/cv-command-center "$HOME/bin/cv-command-center"
 
-Open a second Terminal window and run:
+Configure the tunnel profile to pass this exact value to the MCP server:
 
-```bash
-LOG_FILE="${COMMAND_CENTER_LOG:-/tmp/chatgpt-mac-terminal-command-center.log}"
-touch "$LOG_FILE"
-tail -n 0 -f "$LOG_FILE"
-```
+    COMMAND_CENTER_LOG=/tmp/chatgpt-mac-terminal-command-center.log
 
-Leave this window open. In the first Terminal window, start the tunnel. When ChatGPT invokes a tool, the second window displays the Command Center header, streamed output, and execution report.
+Then open a second Terminal window and run:
+
+    "$HOME/bin/cv-command-center"
+
+The tunnel and viewer must use the same `COMMAND_CENTER_LOG` value. Set it explicitly; Node.js temporary-directory defaults on macOS may not be `/tmp`. See [docs/COMMAND-CENTER.md](docs/COMMAND-CENTER.md) for manual overrides and troubleshooting.
+
+Leave the viewer window open. In the first Terminal window, keep the tunnel running. When ChatGPT invokes a tool, the second window displays the Command Center header, streamed output, and execution report.
 
 To stop the viewer, press `Control-C` in the second window. This does not stop the tunnel.
 

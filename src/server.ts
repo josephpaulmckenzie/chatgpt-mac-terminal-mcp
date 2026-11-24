@@ -1,0 +1,416 @@
+import { createWriteStream } from 'node:fs';
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { spawn } from "node:child_process";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve, sep } from "node:path";
+import { homedir } from "node:os";
+
+const REPO = resolve(homedir(), "Documents/Code/collectors-vault");
+const MAX_OUTPUT = 150_000;
+
+
+const commandCenterLog = createWriteStream(
+  "/tmp/collectors-vault-command-center.log",
+  { flags: "a" }
+);
+
+commandCenterLog.on("error", (error) => {
+  process.stderr.write("[Command Center log error] " + error.message + "\n");
+});
+
+async function run(
+  command: string,
+  args: string[],
+  timeout = 30_000
+): Promise<string> {
+  const display = [command, ...args]
+    .map(part => /\s/.test(part) ? JSON.stringify(part) : part)
+    .join(" ");
+
+  const startedAt = Date.now();
+  const startedLabel = new Date(startedAt).toLocaleString();
+
+  const supportsColor =
+    Boolean(process.stderr.isTTY) &&
+    !process.env.NO_COLOR &&
+    process.env.TERM !== "dumb";
+
+  const c = {
+    reset: "\u001b[0m",
+    cyan: "\u001b[36m",
+    green: "\u001b[32m",
+    red: "\u001b[31m",
+    yellow: "\u001b[33m",
+    muted: "\u001b[90m",
+    bold: "\u001b[1m"
+  };
+
+  const paint = (value: string, color: string): string =>
+    supportsColor ? color + value + c.reset : value;
+
+  const panel = (rows: string[]): string => {
+    const width = 58;
+    const top = "╔" + "═".repeat(width) + "╗";
+    const bottom = "╚" + "═".repeat(width) + "╝";
+    const lines = rows.map(value =>
+      "║ " + value.slice(0, width - 2).padEnd(width - 2) + " ║"
+    );
+    return [top, ...lines, bottom].join("\n");
+  };
+
+  const header = panel([
+    "COLLECTORS VAULT  /  COMMAND CENTER",
+    "MAC TERMINAL EXECUTION",
+    "",
+    "STATUS       RUNNING",
+    "COMMAND      " + display,
+    "STARTED      " + startedLabel
+  ]);
+
+  commandCenterLog.write(
+    paint(header, c.cyan) +
+    "\n\n" +
+    paint("  LIVE OUTPUT", c.bold) +
+    "\n  " + "─".repeat(54) + "\n\n"
+  );
+
+  return await new Promise<string>((resolveRun) => {
+    let output = "";
+    let truncated = false;
+    let timedOut = false;
+    let finished = false;
+
+    const child = spawn(command, args, {
+      cwd: REPO,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    let killHandle: NodeJS.Timeout | undefined;
+
+    const append = (chunk: Buffer): void => {
+      const value = chunk.toString();
+
+      // Preserve live command output in Terminal.
+      commandCenterLog.write(value);
+
+      // Preserve the original output for ChatGPT.
+      const remaining = MAX_OUTPUT - output.length;
+
+      if (remaining > 0) {
+        output += value.slice(0, remaining);
+      }
+
+      if (value.length > remaining) {
+        truncated = true;
+      }
+    };
+
+    const finish = (exitCode: number, detail = ""): void => {
+      if (finished) return;
+      finished = true;
+
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (killHandle) clearTimeout(killHandle);
+
+      if (detail) {
+        commandCenterLog.write(detail);
+        const remaining = MAX_OUTPUT - output.length;
+
+        if (remaining > 0) {
+          output += detail.slice(0, remaining);
+        } else {
+          truncated = true;
+        }
+      }
+
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2);
+      const plain = output.replace(/\u001b\[[0-9;]*m/g, "");
+
+      const passed = plain.match(/\b(\d+)\s+passed\b/i)?.[1];
+      const failed = plain.match(/\b(\d+)\s+failed\b/i)?.[1];
+      const filesPassed = plain.match(/Test Files\s+(\d+)\s+passed/i)?.[1];
+
+      const status = exitCode === 0 ? "SUCCESS" : "FAILED";
+      const statusColor = exitCode === 0 ? c.green : c.red;
+
+      const rows = [
+        "COLLECTORS VAULT  /  EXECUTION REPORT",
+        "",
+        "RESULT       " + status,
+        "EXIT CODE    " + exitCode,
+        "ELAPSED      " + elapsed + " seconds",
+        ""
+      ];
+
+      if (passed !== undefined || failed !== undefined) {
+        rows.push("TESTS PASSED " + (passed ?? "0"));
+        rows.push("TESTS FAILED " + (failed ?? "0"));
+      }
+
+      if (filesPassed !== undefined) {
+        rows.push("FILES PASSED " + filesPassed);
+      }
+
+      rows.push("");
+      rows.push("COMMAND      " + display);
+
+      const summary = panel(rows);
+
+      commandCenterLog.write(
+        "\n\n" +
+        paint(summary, statusColor) +
+        "\n"
+      );
+
+      const truncationNote = truncated
+        ? "\n[ChatGPT output truncated at " + MAX_OUTPUT +
+          " characters; full output was printed in Terminal.]"
+        : "";
+
+      resolveRun(
+        header +
+        "\n\nLIVE OUTPUT\n" +
+        output +
+        truncationNote +
+        "\n\n" +
+        summary +
+        "\n"
+      );
+    };
+
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+
+    child.once("error", (error: Error) => {
+      finish(127, "\n[spawn error] " + error.message);
+    });
+
+    child.once("close", (code, signal) => {
+      const exitCode = timedOut ? 124 : (code ?? 1);
+
+      const detail = timedOut
+        ? "\n[Command timed out after " + timeout + "ms]"
+        : signal
+          ? "\n[Terminated by " + signal + "]"
+          : "";
+
+      finish(exitCode, detail);
+    });
+
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+
+      killHandle = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, 2_000);
+    }, timeout);
+  });
+}
+
+async function safePath(relativePath: string): Promise<string> {
+  const root = await realpath(REPO);
+  const candidate = await realpath(resolve(root, relativePath));
+
+  if (candidate !== root && !candidate.startsWith(root + sep)) {
+    throw new Error("Access outside the repository is prohibited.");
+  }
+
+  const normalized = relativePath.replaceAll("\\", "/");
+  const blocked = /(^|\/)(\.env($|\.)|\.aws|\.ssh|secrets?)(\/|$)|\.(pem|key)$/i;
+
+  if (blocked.test(normalized)) {
+    throw new Error("Access to sensitive files is prohibited.");
+  }
+
+  return candidate;
+}
+
+const server = new McpServer({
+  name: "collectors-vault-mac",
+  version: "1.0.0"
+});
+
+server.tool(
+  "git_status",
+  "Read-only Git status for Collectors Vault.",
+  {},
+  async () => ({
+    content: [{
+      type: "text",
+      text: await run("git", ["status", "--short", "--branch"])
+    }]
+  })
+);
+
+server.tool(
+  "git_branches",
+  "List local and remote Git branches.",
+  {},
+  async () => ({
+    content: [{
+      type: "text",
+      text: await run("git", ["branch", "--all", "--no-color"])
+    }]
+  })
+);
+
+server.tool(
+  "git_log",
+  "Show the latest 20 commits.",
+  {},
+  async () => ({
+    content: [{
+      type: "text",
+      text: await run("git", [
+        "log", "-20",
+        "--date=iso",
+        "--pretty=format:%h %ad %an %s"
+      ])
+    }]
+  })
+);
+
+server.tool(
+  "search_code",
+  "Search tracked repository source using Git grep.",
+  { query: z.string().min(1).max(300) },
+  async ({ query }) => ({
+    content: [{
+      type: "text",
+      text: await run("git", [
+        "grep", "-n", "-I", "-E", query, "--", ".",
+        ":(exclude).env",
+        ":(exclude).env.*",
+        ":(exclude)**/*.pem",
+        ":(exclude)**/*secret*"
+      ])
+    }]
+  })
+);
+
+server.tool(
+  "read_file",
+  "Read a repository file, excluding sensitive files and paths outside the repository.",
+  { path: z.string().min(1).max(500) },
+  async ({ path }) => {
+    try {
+      const file = await safePath(path);
+      const content = await readFile(file, "utf8");
+
+      return {
+        content: [{
+          type: "text",
+          text: content.slice(0, MAX_OUTPUT)
+        }]
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: String(error)
+        }]
+      };
+    }
+  }
+);
+
+server.tool(
+  "run_npm_script",
+  "Run one approved npm script in Collectors Vault.",
+  {
+    script: z.enum(["test", "build", "typecheck", "build:lambda-web"])
+  },
+  async ({ script }) => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(REPO, "package.json"), "utf8")
+    );
+
+    if (!packageJson.scripts?.[script]) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: `Script not found in package.json: ${script}`
+        }]
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: await run("npm", ["run", script], 600_000)
+      }]
+    };
+  }
+);
+
+server.tool(
+  "run_command",
+  "Execute an approved read-only command in the Collectors Vault repository and stream its output to the Mac Terminal.",
+  { command: z.string().trim().min(1).max(300) },
+  async ({ command }) => {
+    const parts = command.trim().split(/\s+/);
+    const executable = parts.shift() ?? "";
+    const args = parts;
+
+    const allowedCommands = [
+      ["pwd"],
+      ["date"],
+      ["whoami"],
+      ["hostname"],
+      ["node", "--version"],
+      ["node", "-v"],
+      ["npm", "--version"],
+      ["npm", "-v"],
+      ["ls"],
+      ["ls", "-la"],
+      ["ls", "-la", "."],
+      ["du", "-sh", "."],
+      ["find", ".", "-maxdepth", "2", "-type", "f"],
+      ["git", "status"],
+      ["git", "status", "--short", "--branch"],
+      ["git", "log", "-5", "--oneline"],
+      ["git", "branch", "--all", "--no-color"],
+      ["git", "diff", "--stat"],
+      ["git", "diff", "--name-only"],
+      ["git", "rev-parse", "--show-toplevel"],
+      ["npx", "vitest", "run", "tests/auth.test.ts"]
+    ];
+
+    const approved = allowedCommands.some(
+      candidate =>
+        candidate.length === parts.length + 1 &&
+        candidate[0] === executable &&
+        candidate.slice(1).every((value, index) => value === args[index])
+    );
+
+    if (!approved) {
+      return {
+        isError: true,
+        content: [{
+          type: "text",
+          text: "Command not approved. Read-only commands only."
+        }]
+      };
+    }
+
+    const output = await run(executable, args);
+
+    return {
+      content: [{
+        type: "text",
+        text: output
+      }]
+    };
+  }
+);
+
+
+const transport = new StdioServerTransport();
+await server.connect(transport);

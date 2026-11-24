@@ -1,11 +1,8 @@
 # ChatGPT Mac Terminal MCP
 
-A small local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
-server that connects ChatGPT to a deliberately scoped set of developer tools
-on a Mac. This project packages the implementation used for the Collectors
-Vault Mac Terminal connection, with machine-specific configuration excluded.
+A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects ChatGPT to a deliberately scoped set of developer tools on a Mac. This project packages the implementation used for the original Collectors Vault Mac Terminal connection and makes its repository scope configurable for other projects.
 
-The included server exposes these tools:
+The server exposes seven tools:
 
 - `git_status`
 - `git_branches`
@@ -15,9 +12,7 @@ The included server exposes these tools:
 - `run_npm_script`
 - `run_command`
 
-The command runner is intentionally allowlisted. It is not a general-purpose
-remote shell. Keep that restriction unless you have designed, reviewed, and
-tested a separate permission model.
+The command runner is intentionally allowlisted. It is not a general-purpose remote shell. Keep that restriction unless you have designed, reviewed, and tested a separate permission model.
 
 ## Architecture
 
@@ -34,167 +29,140 @@ Secure MCP tunnel client
 Local MCP server (stdio)
        |
        v
-Allowlisted tools operating in REPO
+Configured repository (REPO)
 ```
 
-The Command Center writes formatted execution output to a local log file so a
-second Terminal window can display it with `tail -f`. The log is local and is
-not part of this repository.
+The Command Center writes formatted execution output to a local log file so a second Terminal window can display it with `tail -f`. The log is local and is not part of this repository.
 
 ## Requirements
 
 - macOS
-- Node.js (the original setup used Node 24)
+- Node.js 24 or a currently supported Node.js LTS release
 - npm
 - Git
-- GitHub CLI (`gh`) if you want to publish your own copy
 - A supported Secure MCP Tunnel client and account/connection
-- A ChatGPT account/workspace where custom MCP connections are available
+- A ChatGPT account/workspace that permits custom MCP server connections
 
-## 1. Clone and install
+## 1. Clone and build the MCP server
 
 ```bash
-git clone https://github.com/OWNER/chatgpt-mac-terminal-mcp.git
+git clone https://github.com/josephpaulmckenzie/chatgpt-mac-terminal-mcp.git
 cd chatgpt-mac-terminal-mcp
 npm ci
+npm run build
 ```
 
-If the repository does not include a lockfile, use `npm install` instead.
+The compiled server entry point is `dist/server.js`.
 
 ## 2. Configure the repository scope
 
-The MCP server must operate only inside the repository you intend to expose.
-Set `REPO` to that repository's absolute path in the local MCP server launch
-configuration. Start from `.env.example` as a reference; do not commit real
-environment files or credentials.
-
-Example:
+Set these environment variables in the local tunnel profile or in the wrapper that launches the MCP server. The server does **not** automatically load a `.env` file; `.env.example` documents the supported variables.
 
 ```text
-REPO=/Users/you/Documents/Code/your-project
+REPO=/absolute/path/to/the/project-you-want-to-access
+MCP_SERVER_NAME=mac-terminal
+COMMAND_CENTER_LOG=/tmp/chatgpt-mac-terminal-command-center.log
+ALLOWED_NPM_SCRIPTS=build,test,typecheck
 ```
 
-Review `src/server.ts` before use. In particular, verify the command allowlist,
-path validation, output limits, and timeouts match your security requirements.
+- `REPO` is required and must be an absolute path to an existing directory. File, Git, and command tools are confined to this repository.
+- `MCP_SERVER_NAME` is an optional server label.
+- `COMMAND_CENTER_LOG` is an optional absolute path for the local dashboard log. It defaults to the system temporary directory.
+- `ALLOWED_NPM_SCRIPTS` is a comma-separated allowlist for `run_npm_script`. Each requested script must also exist in the target repository's `package.json`. The default is `build,test,typecheck`; specify only scripts you have reviewed.
 
-## 3. Install and configure the tunnel client
+Review `src/server.ts` before use. In particular, verify the command allowlist, path validation, output limits, and timeouts match your security requirements.
 
-Install the Secure MCP Tunnel client from the distribution provided for your
-account/platform. Place the executable at the path expected by your local
-launch command, or update that command to match its actual location.
+## 3. Configure the tunnel client
 
-Create a tunnel profile that launches the MCP server as a local stdio process.
-Use the server's Node entry point/build output and pass the required
-environment, including `REPO`. Keep the profile local: do not publish it if it
-contains a tunnel identifier, credential, account-specific endpoint, or local
-filesystem path.
+Install the Secure MCP Tunnel client supplied for your account/platform. Configure a local tunnel profile that starts the compiled MCP server as a stdio process using Node.js and `dist/server.js`. The profile must pass the environment variables above to the MCP process.
 
-The original Mac setup used:
+Use the tunnel client's current documentation for profile syntax and startup options. Keep the profile local: do not publish it if it contains a tunnel identifier, credential, account-specific endpoint, or local filesystem path.
 
-- Tunnel profile name: `collectors-vault-mac`
-- Executable: `~/bin/tunnel-client`
-- MCP project directory: `~/.local/share/collectors-vault-mcp`
+The original Mac setup used these local names:
+
+- Tunnel profile: `collectors-vault-mac`
+- Tunnel executable: `~/bin/tunnel-client`
+- Original MCP source directory: `~/.local/share/collectors-vault-mcp`
 - Node installed through `nvm`
 
-Those are examples from one installation, not values to copy blindly.
+Those are examples from one installation, not values that other users need to copy.
 
 ## 4. Store the tunnel credential in macOS Keychain
 
-Do not put the tunnel API key in this repository, a shell script, a `.env` file,
-or a ChatGPT message. Store it in macOS Keychain using the service/account
-names required by your tunnel client configuration.
+Do not put the tunnel API key in this repository, a shell script, a `.env` file, or a ChatGPT message. Store it in macOS Keychain using the service/account names required by your tunnel client configuration.
 
-The original setup retrieved it at launch time with `security
-find-generic-password`; the key itself was never written into the command or
-repository. Follow the tunnel provider's current instructions for creating the
-Keychain item and setting the expected environment variable.
+The original setup retrieved the credential at launch time with macOS `security find-generic-password`; the key itself was never written into the command or repository. Follow your tunnel provider's current instructions for creating the Keychain item and setting the expected environment variable.
 
 ## 5. Start the tunnel
 
-The original installation used this launch pattern. Replace the profile and
-credential service/account values with the values from your own tunnel setup:
+Start the tunnel using the profile you configured. Keep the tunnel process running while ChatGPT uses the connection. The MCP process should receive `REPO`, `MCP_SERVER_NAME`, `COMMAND_CENTER_LOG`, and `ALLOWED_NPM_SCRIPTS` through its environment.
 
-```bash
-export CONTROL_PLANE_TUNNEL_ID="YOUR_TUNNEL_ID"
-export CONTROL_PLANE_API_KEY="$(security find-generic-password -s YOUR_KEYCHAIN_SERVICE -a "$USER" -w)" || exit 1
-"$HOME/bin/tunnel-client" run --profile YOUR_PROFILE_NAME
-```
+Never commit the real tunnel ID, API key, or profile YAML.
 
-Never commit the real tunnel ID, API key, or profile YAML. Keep this Terminal
-window running while ChatGPT uses the connection.
+## 6. Connect the tunnel in ChatGPT
 
-## 6. Configure ChatGPT
+Custom MCP connections are managed through ChatGPT's Plugins experience. Availability and required workspace permissions vary by plan and organization.
 
-The following describes the custom MCP connection flow used in the original
-setup. ChatGPT labels and availability can vary by plan, workspace, and product
-release; follow the current UI shown in your account if labels differ.
+1. Open ChatGPT on the web.
+2. Open **Plugins**.
+3. Select the **+** button, then choose **Add custom MCP server**.
+4. Enter a name and optional description.
+5. Under **Connection**, choose **Tunnel**. Select an available Secure MCP Tunnel or enter the tunnel ID provided by your tunnel setup.
+6. Configure authentication as required by the connection.
+7. Review the risk warning and select **I understand and want to continue**.
+8. Select **Create as a plugin**, then review the discovered tools and metadata.
+9. Install the resulting plugin.
+10. Start a conversation, type **@**, select your plugin, and try a harmless read-only request.
 
-1. Open ChatGPT in a desktop web browser.
-2. Open **Settings** and locate **Plugins** / the custom MCP app area.
-3. Choose **Add** (`+`) and select **Add custom MCP server**.
-4. Enter an app name (for example, `Collectors Vault Mac Terminal`) and a
-   description explaining the tools and repository scope.
-5. Under **Connection**, choose **Tunnel** and select the Secure MCP Tunnel
-   connection/profile you configured.
-6. Configure the authentication method required by the tunnel.
-7. Review the security warning and the tools/permissions being exposed.
-8. Choose **Create as a plugin** (or the equivalent action displayed).
-9. Install/enable the app for use in conversations.
-10. Start a new conversation and invoke one of the exposed tools.
+Custom MCP access is subject to ChatGPT plan and workspace policy. For current requirements and administrator controls, see [OpenAI's custom MCP connection guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt).
 
-Only connect a server you control. Review every tool's behavior and do not
-expose unrestricted shell access, secrets, or unrelated directories.
+Only connect a server you control. Review the tools and permissions before enabling the connection.
 
 ## 7. Enable the Command Center log viewer
 
-The MCP server writes its formatted execution display to:
+The default log file on macOS is:
 
 ```text
-/tmp/collectors-vault-command-center.log
+/tmp/chatgpt-mac-terminal-command-center.log
 ```
 
 Open a second Terminal window and run:
 
 ```bash
-touch /tmp/collectors-vault-command-center.log
-tail -n 0 -f /tmp/collectors-vault-command-center.log
+LOG_FILE="${COMMAND_CENTER_LOG:-/tmp/chatgpt-mac-terminal-command-center.log}"
+touch "$LOG_FILE"
+tail -n 0 -f "$LOG_FILE"
 ```
 
-Leave this window open. In the first Terminal window, start/restart the tunnel.
-When ChatGPT invokes a tool, the second window should show the Command Center
-header, live output, and execution report.
+Leave this window open. In the first Terminal window, start the tunnel. When ChatGPT invokes a tool, the second window displays the Command Center header, streamed output, and execution report.
 
-To stop the viewer, press `Control-C` in the second window. This does not stop
-the tunnel.
+To stop the viewer, press `Control-C` in the second window. This does not stop the tunnel.
 
 ## 8. Try it from ChatGPT
 
-Examples of plain-English requests:
+Examples:
 
 - "Check my Git status."
 - "Show me the latest commits."
-- "Find where the app handles Cognito callbacks."
-- "Run the authentication tests."
-- "Build the application."
+- "Find where the app handles authentication callbacks."
+- "Run the test script."
 
-The server only supports commands explicitly implemented and allowlisted in
-`src/server.ts`. A natural-language request does not bypass those restrictions.
+The server only runs npm scripts included in `ALLOWED_NPM_SCRIPTS` and present in the target repository's `package.json`. The separate `run_command` tool supports only exact commands implemented in its allowlist. Natural-language requests do not bypass those restrictions.
 
 ## Security checklist
 
-Before publishing or deploying:
+Before using or sharing a connection:
 
-- [ ] No API keys, tunnel credentials, tokens, private keys, or `.env` files.
-- [ ] No account-specific tunnel IDs or local profile YAML.
-- [ ] `REPO` points only to the intended project.
+- [ ] No API keys, tunnel credentials, tokens, private keys, or real `.env` files are committed.
+- [ ] No account-specific tunnel IDs or local profile YAML are published.
+- [ ] `REPO` points only to the intended project directory.
 - [ ] File access rejects paths outside the repository.
 - [ ] Shell commands are allowlisted and argument handling is reviewed.
+- [ ] npm scripts are limited by `ALLOWED_NPM_SCRIPTS`.
 - [ ] Output limits and execution timeouts are enabled.
 - [ ] Every exposed tool is understood and tested.
-- [ ] The tunnel is authenticated and the ChatGPT connection is limited to the
-      intended user/workspace.
+- [ ] The tunnel is authenticated and the ChatGPT connection is limited to the intended user/workspace.
 
 ## License
 
-Choose and add a license before encouraging reuse. Until a license is added,
-all rights are reserved by default.
+No license is currently included. Until a license is added, all rights are reserved by default.

@@ -2,7 +2,7 @@
 
 A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects ChatGPT to a deliberately scoped set of developer tools on a Mac. This project packages the implementation used for the original Collectors Vault Mac Terminal connection and makes its repository scope configurable for other projects.
 
-The server exposes eight tools:
+The server exposes ten tools:
 
 - `git_status`
 - `git_branches`
@@ -10,10 +10,12 @@ The server exposes eight tools:
 - `search_code`
 - `read_file`
 - `write_file` (repository-scoped text-file creation and updates)
+- `delete_file` (explicitly confirmed, repository-scoped regular-file deletion)
+- `git_diff` (inspect staged or unstaged changes, optionally for one path)
 - `run_npm_script`
 - `run_command`
 
-The command runner is intentionally allowlisted. It is not a general-purpose remote shell. `write_file` permits text-file creation and updates only inside the selected repository; it rejects sensitive paths, symlinks, and paths outside the repository. New files are created by default; updating an existing file requires `overwrite=true`. Keep these boundaries unless you have designed, reviewed, and tested a separate permission model.
+The command runner is intentionally allowlisted. It is not a general-purpose remote shell. `write_file` permits text-file creation and updates only inside the selected repository; it rejects sensitive paths, symlinks, and paths outside the repository. New files are created by default; updating an existing file requires `overwrite=true`. `delete_file` requires `confirm=true` and only removes one regular file; it rejects directories, symlinks, sensitive paths, and paths outside the repository. `git_diff` is read-only and can show staged or unstaged changes. Keep these boundaries unless you have designed, reviewed, and tested a separate permission model.
 
 ## Architecture
 
@@ -162,7 +164,8 @@ Before using or sharing a connection:
 - [ ] `REPO` points only to the intended project directory.
 - [ ] File access rejects paths outside the repository.
 - [ ] Shell commands are allowlisted and argument handling is reviewed.
-- [ ] File writes are limited to repository-relative regular files; sensitive paths and symlinks are rejected.
+- [ ] File writes and deletions are limited to repository-relative regular files; sensitive paths and symlinks are rejected.
+- [ ] File deletion requires explicit `confirm=true` and cannot remove directories.
 - [ ] npm scripts are limited by `ALLOWED_NPM_SCRIPTS`.
 - [ ] Output limits and execution timeouts are enabled.
 - [ ] Every exposed tool is understood and tested.

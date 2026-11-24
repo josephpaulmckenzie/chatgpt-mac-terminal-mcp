@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep this value identical to COMMAND_CENTER_LOG passed to the MCP server.
+LOG_FILE="${COMMAND_CENTER_LOG:-/tmp/chatgpt-mac-terminal-command-center.log}"
+LOG_DIR="$(dirname "$LOG_FILE")"
+
+mkdir -p "$LOG_DIR"
+touch "$LOG_FILE"
+
+printf '%s\n' \
+  '==========================================' \
+  '  COLLECTORS VAULT — LIVE COMMAND CENTER' \
+  '==========================================' \
+  "  Watching: $LOG_FILE" \
+  '  Waiting for ChatGPT commands...' \
+  '  Press Control-C to stop viewing.' \
+  '==========================================' \
+  ''
+
+exec tail -n 0 -f "$LOG_FILE"

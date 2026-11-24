@@ -2,8 +2,9 @@
 
 A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects ChatGPT to a deliberately scoped set of developer tools on a Mac. This project packages the implementation used for the original Collectors Vault Mac Terminal connection and makes its repository scope configurable for other projects.
 
-The server exposes twelve tools:
+The server exposes thirteen tools:
 
+- `git_sync` (explicitly confirmed, clean-tree-only fast-forward from the configured upstream; refuses ahead/diverged histories)
 - `git_status`
 - `git_branches`
 - `git_log`

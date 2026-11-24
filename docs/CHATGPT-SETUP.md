@@ -40,6 +40,7 @@ This guide follows OpenAI's current custom MCP connection flow. Menu availabilit
 - Preflight checks are heuristic. They redact detected credential-like values and flag possible personal data, but cannot guarantee detection of every sensitive value.
 - Only scripts explicitly configured in `ALLOWED_NPM_SCRIPTS` can be run through `run_npm_script`. Treat the selected script as executable code from that repository; use this tool only with repositories you trust. The runner disables npm pre/post lifecycle hooks, but it does not sandbox the requested script.
 - `search_code` and `git_diff` exclude common credential paths and key/certificate files; `git_diff` rejects explicit requests for sensitive paths.
+- The command log is opened without following symlinks, rejects hard-linked files, and is restricted to mode `0600`.
 - The command runner is allowlisted and is not a general-purpose shell.
 
 For current plan availability, workspace permissions, and administrator controls, see [Connecting custom MCP servers in ChatGPT](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt).

@@ -15,7 +15,25 @@ if (!isAbsolute(repoValue)) {
   throw new Error("REPO must be an absolute filesystem path.");
 }
 
-const REPO = await realpath(resolve(repoValue));
+const DEFAULT_REPO = await realpath(resolve(repoValue));
+const configuredRepositories = new Map<string, string>([["default", DEFAULT_REPO]]);
+for (const entry of (process.env.ALLOWED_REPOS ?? "").split(";").map(value => value.trim()).filter(Boolean)) {
+  const separator = entry.indexOf("=");
+  if (separator <= 0) throw new Error("ALLOWED_REPOS entries must use alias=/absolute/path format, separated by semicolons.");
+  const alias = entry.slice(0, separator).trim();
+  const path = entry.slice(separator + 1).trim();
+  if (!/^[a-zA-Z0-9_-]+$/.test(alias) || alias === "default") {
+    throw new Error("ALLOWED_REPOS aliases must use letters, numbers, underscores, or hyphens; 'default' is reserved.");
+  }
+  if (!isAbsolute(path)) throw new Error(`Repository path for '${alias}' must be absolute.`);
+  if (configuredRepositories.has(alias)) throw new Error(`Duplicate repository alias: ${alias}`);
+  configuredRepositories.set(alias, await realpath(resolve(path)));
+}
+async function getRepository(alias = "default"): Promise<string> {
+  const repository = configuredRepositories.get(alias);
+  if (!repository) throw new Error(`Unknown repository '${alias}'. Available: ${[...configuredRepositories.keys()].join(", ")}`);
+  return repository;
+}
 const COMMAND_CENTER_LOG_PATH = resolve(
   process.env.COMMAND_CENTER_LOG?.trim() ||
   resolve(tmpdir(), "chatgpt-mac-terminal-command-center.log")
@@ -46,7 +64,8 @@ commandCenterLog.on("error", (error) => {
 async function run(
   command: string,
   args: string[],
-  timeout = 30_000
+  timeout = 30_000,
+  cwd = DEFAULT_REPO
 ): Promise<string> {
   const display = [command, ...args]
     .map(part => /\s/.test(part) ? JSON.stringify(part) : part)
@@ -106,7 +125,7 @@ async function run(
     let finished = false;
 
     const child = spawn(command, args, {
-      cwd: REPO,
+      cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -235,8 +254,8 @@ async function run(
   });
 }
 
-async function safePath(relativePath: string): Promise<string> {
-  const root = await realpath(REPO);
+async function safePath(repository: string, relativePath: string): Promise<string> {
+  const root = await realpath(repository);
   const candidate = await realpath(resolve(root, relativePath));
 
   if (candidate !== root && !candidate.startsWith(root + sep)) {
@@ -261,11 +280,11 @@ const server = new McpServer({
 server.tool(
   "git_status",
   "Read-only Git status for the configured repository.",
-  {},
-  async () => ({
+  { repository: z.string().default("default") },
+  async ({ repository }) => ({
     content: [{
       type: "text",
-      text: await run("git", ["status", "--short", "--branch"])
+      text: await run("git", ["status", "--short", "--branch"], 30_000, await getRepository(repository))
     }]
   })
 );
@@ -273,11 +292,11 @@ server.tool(
 server.tool(
   "git_branches",
   "List local and remote Git branches.",
-  {},
-  async () => ({
+  { repository: z.string().default("default") },
+  async ({ repository }) => ({
     content: [{
       type: "text",
-      text: await run("git", ["branch", "--all", "--no-color"])
+      text: await run("git", ["branch", "--all", "--no-color"], 30_000, await getRepository(repository))
     }]
   })
 );
@@ -285,15 +304,15 @@ server.tool(
 server.tool(
   "git_log",
   "Show the latest 20 commits.",
-  {},
-  async () => ({
+  { repository: z.string().default("default") },
+  async ({ repository }) => ({
     content: [{
       type: "text",
       text: await run("git", [
         "log", "-20",
         "--date=iso",
         "--pretty=format:%h %ad %an %s"
-      ])
+      ], 30_000, await getRepository(repository))
     }]
   })
 );
@@ -301,8 +320,8 @@ server.tool(
 server.tool(
   "search_code",
   "Search tracked repository source using Git grep.",
-  { query: z.string().min(1).max(300) },
-  async ({ query }) => ({
+  { query: z.string().min(1).max(300), repository: z.string().default("default") },
+  async ({ query, repository }) => ({
     content: [{
       type: "text",
       text: await run("git", [
@@ -311,7 +330,7 @@ server.tool(
         ":(exclude).env.*",
         ":(exclude)**/*.pem",
         ":(exclude)**/*secret*"
-      ])
+      ], 30_000, await getRepository(repository))
     }]
   })
 );
@@ -319,10 +338,10 @@ server.tool(
 server.tool(
   "read_file",
   "Read a repository file, excluding sensitive files and paths outside the repository.",
-  { path: z.string().min(1).max(500) },
-  async ({ path }) => {
+  { path: z.string().min(1).max(500), repository: z.string().default("default") },
+  async ({ path, repository }) => {
     try {
-      const file = await safePath(path);
+      const file = await safePath(await getRepository(repository), path);
       const content = await readFile(file, "utf8");
 
       return {
@@ -347,11 +366,13 @@ server.tool(
   "run_npm_script",
   "Run one npm script explicitly included in ALLOWED_NPM_SCRIPTS for the configured repository.",
   {
-    script: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9:_-]+$/)
+    script: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9:_-]+$/),
+    repository: z.string().default("default")
   },
-  async ({ script }) => {
+  async ({ script, repository }) => {
+    const repo = await getRepository(repository);
     const packageJson = JSON.parse(
-      await readFile(resolve(REPO, "package.json"), "utf8")
+      await readFile(resolve(repo, "package.json"), "utf8")
     );
 
     if (!allowedNpmScripts.has(script)) {
@@ -377,7 +398,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: await run("npm", ["run", script], 600_000)
+        text: await run("npm", ["run", script], 600_000, repo)
       }]
     };
   }
@@ -386,8 +407,9 @@ server.tool(
 server.tool(
   "run_command",
   "Execute an exact allowlisted read-only command in the configured repository and stream its output to the Mac Terminal.",
-  { command: z.string().trim().min(1).max(300) },
-  async ({ command }) => {
+  { command: z.string().trim().min(1).max(300), repository: z.string().default("default") },
+  async ({ command, repository }) => {
+    const repo = await getRepository(repository);
     const parts = command.trim().split(/\s+/);
     const executable = parts.shift() ?? "";
     const args = parts;
@@ -432,7 +454,7 @@ server.tool(
       };
     }
 
-    const output = await run(executable, args);
+    const output = await run(executable, args, 30_000, repo);
 
     return {
       content: [{

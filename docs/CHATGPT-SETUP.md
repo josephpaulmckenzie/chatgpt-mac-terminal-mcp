@@ -5,7 +5,7 @@ This guide follows OpenAI's current custom MCP connection flow. Menu availabilit
 ## Before connecting
 
 - Build and start the local MCP server through your Secure MCP Tunnel profile.
-- Confirm the profile passes the required `REPO` environment variable to the MCP process.
+- Confirm the profile passes the required `REPO` environment variable and optional `ALLOWED_REPOS` environment variable to the MCP process.
 - Confirm the tunnel is available to the target ChatGPT workspace.
 - Review the seven tools and their permission boundaries before connecting.
 
@@ -35,7 +35,7 @@ This guide follows OpenAI's current custom MCP connection flow. Menu availabilit
 - Do not paste tunnel API keys into ChatGPT.
 - Do not publish the tunnel profile, Keychain item, tunnel identifier, or credentials.
 - The server does not load `.env` automatically; pass configuration through the tunnel launch environment.
-- `REPO` determines the filesystem scope. Use a dedicated project directory and do not point it at your home directory or filesystem root.
+- `REPO` determines the default filesystem scope. `ALLOWED_REPOS` may add named, explicit project directories. Tools select one configured alias per call; do not point any entry at your home directory or filesystem root.
 - Only scripts explicitly configured in `ALLOWED_NPM_SCRIPTS` can be run through `run_npm_script`.
 - The command runner is allowlisted and is not a general-purpose shell.
 

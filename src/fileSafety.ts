@@ -9,7 +9,7 @@ function validateRelativePath(relativePath: string): string[] {
   const segments = relativePath.replaceAll("\\", "/").split("/");
   const lower = segments.map(segment => segment.toLowerCase());
   const leaf = lower.at(-1) ?? "";
-  if (segments.some(segment => !segment || segment === "." || segment === "..") || lower.some(segment => BLOCKED_SEGMENTS.has(segment) || segment === ".env" || segment.startsWith(".env.")) || BLOCKED_EXTENSIONS.some(extension => leaf.endsWith(extension))) throw new Error("Sensitive or protected paths are prohibited.");
+  if (segments.some(segment => !segment || segment === "." || segment === "..") || isProtectedRepositoryPath(relativePath)) throw new Error("Sensitive or protected paths are prohibited.");
   return segments;
 }
 
@@ -71,8 +71,7 @@ export async function writeRegularFile(path: string, content: string, overwrite:
     const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
     try {
       if (!(await handle.stat()).isFile()) throw new Error("Target must be a regular file.");
-      const replacement = Buffer.from(content, "utf8");
-    await handle.write(replacement, 0, replacement.length, 0);
+      await handle.writeFile(content, { encoding: "utf8" });
       await handle.sync();
     } finally { await handle.close(); }
     return;
@@ -108,7 +107,21 @@ export async function deleteRegularFile(path: string, expectedCurrentSha256: str
   let identity: { dev: number; ino: number };
   try {
     const info = await handle.stat();
-    if (!info.isFile() || sha256Text(await handle.readFile()) !== expectedCurrentSha256) throw new Error("Target changed after preflight; deletion was refused.");
+    if (!info.isFile() || info.size > 150_000) {
+      throw new Error("Only regular files within the configured size limit may be deleted.");
+    }
+    const chunks: Buffer[] = [];
+    let position = 0;
+    while (position < info.size) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, info.size - position));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    if (position !== info.size || sha256Text(Buffer.concat(chunks, position)) !== expectedCurrentSha256) {
+      throw new Error("Target changed after preflight; deletion was refused.");
+    }
     identity = { dev: info.dev, ino: info.ino };
   } finally { await handle.close(); }
   const latest = await lstat(path);

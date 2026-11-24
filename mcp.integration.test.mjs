@@ -107,10 +107,27 @@ test("search excludes root and nested credential paths while returning public so
   }
 });
 
-test("read rejects symlink paths and protected files", async () => {
-  for (const path of ["linked-file.txt", "linked-dir/escape.txt", ".env", "nested/.env.local", ".aws/credentials"]) {
+test("read rejects symlink paths and all case-insensitive protected names", async () => {
+  for (const path of [
+    "linked-file.txt", "linked-dir/escape.txt", ".env", "nested/.env.local",
+    ".aws/credentials", "nested/app-secret.txt", "nested/credentials.json",
+    "nested/Credentials.JSON", "nested/client.key"
+  ]) {
     assertError(await client.callTool({ name: "read_file", arguments: { path } }));
   }
+});
+
+test("write preflight rejects secret and credential filenames", async () => {
+  for (const path of ["nested/app-secret.txt", "nested/credentials.json", "nested/Credentials.JSON"]) {
+    assertError(await client.callTool({ name: "preview_write", arguments: { path, content: "must not write" } }));
+  }
+});
+
+test("git_diff rejects control characters in explicit paths", async () => {
+  assertError(await client.callTool({
+    name: "git_diff",
+    arguments: { path: "public\u0000.txt" }
+  }), /safe, non-sensitive/);
 });
 
 test("write preview rejects symlink targets", async () => {

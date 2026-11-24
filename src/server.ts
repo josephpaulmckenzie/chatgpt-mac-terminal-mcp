@@ -538,7 +538,7 @@ server.tool(
       if (
         isAbsolute(path) ||
         segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
-        /[\\u0000-\\u001f]/.test(path) ||
+        /[\u0000-\u001f]/.test(path) ||
         path.startsWith(":") ||
         isProtectedRepositoryPath(normalized)
       ) {

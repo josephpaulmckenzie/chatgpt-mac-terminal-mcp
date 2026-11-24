@@ -60,6 +60,12 @@ export function sha256Text(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function isHighRiskFinding(finding: ContentFinding): boolean {
+  return finding.category === "aws_access_key" ||
+    finding.category === "github_token" ||
+    finding.category === "private_key";
+}
+
 export function scanSensitiveContent(content: string): ContentFinding[] {
   const findings: ContentFinding[] = [];
   const seen = new Set<string>();

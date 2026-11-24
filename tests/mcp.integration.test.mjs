@@ -248,6 +248,20 @@ test("command runner rejects shell injection syntax", async () => {
   await assert.rejects(readFile(join(repo, "injected")), { code: "ENOENT" });
 });
 
+test("run_command permits common exact read-only Git inspection commands", async () => {
+  for (const command of [
+    "git status --short",
+    "git status --porcelain",
+    "git branch --show-current",
+    "git remote -v",
+    "git rev-parse HEAD",
+    "git diff --cached --stat"
+  ]) {
+    const result = await client.callTool({ name: "run_command", arguments: { command } });
+    assert.notEqual(result.isError, true, command + ": " + output(result));
+  }
+});
+
 test("npm script runner disables lifecycle hooks", async () => {
   const result = await client.callTool({ name: "run_npm_script", arguments: { script: "safe" } });
   assert.notEqual(result.isError, true, output(result));
@@ -276,18 +290,24 @@ test("overwrite preview is bound to the original content hash", async () => {
   assert.equal(await readFile(join(repo, path), "utf8"), "intervening replacement");
 });
 
-test("sensitive-content findings require explicit acknowledgement", async () => {
-  const path = "review-required.txt";
+test("personal information findings are informational and do not block writes", async () => {
+  const path = "personal-info.txt";
   const email = ["joe", "@", "example", ".com"].join("");
   const content = "Contact " + email;
   const ticket = await previewWrite(path, content);
-  assert.equal(ticket.reviewRequired, true);
+  assert.equal(ticket.reviewRequired, false);
   assert.ok(ticket.findings.some(finding => finding.category === "email_address"));
-  assertError(await client.callTool({ name: "write_file", arguments: { path, content, preflightToken: ticket.preflightToken } }), /acknowledge/i);
-  const refreshed = await previewWrite(path, content);
-  const approved = await client.callTool({ name: "write_file", arguments: { path, content, preflightToken: refreshed.preflightToken, acknowledgeFindings: true } });
-  assert.notEqual(approved.isError, true, output(approved));
+  const result = await client.callTool({ name: "write_file", arguments: { path, content, preflightToken: ticket.preflightToken } });
+  assert.notEqual(result.isError, true, output(result));
   assert.equal(await readFile(join(repo, path), "utf8"), content);
+});
+
+test("credential findings still require explicit acknowledgement", async () => {
+  const path = "high-risk-content.txt";
+  const content = "AWS_ACCESS_KEY_ID=" + ["AKIA", "1234567890ABCDEF"].join("");
+  const ticket = await previewWrite(path, content);
+  assert.equal(ticket.reviewRequired, true);
+  assertError(await client.callTool({ name: "write_file", arguments: { path, content, preflightToken: ticket.preflightToken } }), /high-risk credentials/i);
 });
 
 test("approved deletion removes the exact preflighted file", async () => {

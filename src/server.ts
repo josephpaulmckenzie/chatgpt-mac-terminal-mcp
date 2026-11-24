@@ -4,7 +4,7 @@ import { z } from "zod";
 import { spawn } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { PreflightTicketStore, scanSensitiveContent, sha256Text } from "./writePreflight.js";
+import { isHighRiskFinding, PreflightTicketStore, scanSensitiveContent, sha256Text } from "./writePreflight.js";
 import { deleteRegularFile, isProtectedRepositoryPath, readRegularFile, resolveRepositoryFile, writeRegularFile } from "./fileSafety.js";
 import { tmpdir } from "node:os";
 import { openSecureLog } from "./secureLog.js";
@@ -383,7 +383,9 @@ server.tool(
             operation: "write", repository, path, overwrite,
             currentSha256, proposedSha256,
             bytes: Buffer.byteLength(content, "utf8"),
-            findings, reviewRequired: findings.length > 0,
+            findings,
+            reviewRequired: findings.some(isHighRiskFinding),
+            informationalFindings: findings.filter(finding => !isHighRiskFinding(finding)).length,
             preflightToken, tokenExpiresInSeconds: 300
           }, null, 2)
         }]
@@ -418,8 +420,9 @@ server.tool(
       if (!ticket) {
         throw new Error("Preflight missing, expired, already used, or file/payload changed. Run preview_write again.");
       }
-      if (ticket.findings.length > 0 && !acknowledgeFindings) {
-        throw new Error("Preflight found possible personal or sensitive data. Review findings and explicitly acknowledge them.");
+      const highRiskFindings = ticket.findings.filter(isHighRiskFinding);
+      if (highRiskFindings.length > 0 && !acknowledgeFindings) {
+        throw new Error("Preflight found high-risk credentials or private-key material. Review findings and explicitly acknowledge them.");
       }
       if (!overwrite) {
         await writeRegularFile(target, content, false, null);
@@ -625,13 +628,26 @@ server.tool(
       ["du", "-sh", "."],
       ["find", ".", "-maxdepth", "2", "-type", "f"],
       ["git", "status"],
+      ["git", "status", "--short"],
+      ["git", "status", "--branch"],
+      ["git", "status", "--porcelain"],
+      ["git", "status", "--porcelain=v1"],
       ["git", "status", "--short", "--branch"],
       ["git", "log", "-5", "--oneline"],
+      ["git", "log", "-10", "--oneline"],
+      ["git", "log", "-20", "--oneline"],
       ["git", "branch", "--all", "--no-color"],
+      ["git", "branch", "--show-current"],
+      ["git", "remote", "-v"],
+      ["git", "rev-parse", "--show-toplevel"],
+      ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+      ["git", "rev-parse", "HEAD"],
       ["git", "diff", "--stat"],
       ["git", "diff", "--check"],
       ["git", "diff", "--name-only"],
-      ["git", "rev-parse", "--show-toplevel"],
+      ["git", "diff", "--cached", "--stat"],
+      ["git", "diff", "--cached", "--check"],
+      ["git", "diff", "--cached", "--name-only"],
     ];
 
     const approved = allowedCommands.some(

@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, lstat, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -272,6 +272,48 @@ async function safePath(repository: string, relativePath: string): Promise<strin
   return candidate;
 }
 
+async function safeWritePath(repository: string, relativePath: string): Promise<string> {
+  if (relativePath.trim().length === 0 || isAbsolute(relativePath)) {
+    throw new Error("A non-empty repository-relative path is required.");
+  }
+
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  const lowerSegments = segments.map(segment => segment.toLowerCase());
+  const blockedSegments = new Set([".git", "node_modules", ".aws", ".ssh", "secret", "secrets"]);
+  const leaf = lowerSegments.at(-1) ?? "";
+  if (
+    segments.some(segment => segment === "." || segment === ".." || segment.length === 0) ||
+    lowerSegments.some(segment => blockedSegments.has(segment) || segment === ".env" || segment.startsWith(".env.")) ||
+    [".pem", ".key", ".p12", ".pfx"].some(extension => leaf.endsWith(extension))
+  ) {
+    throw new Error("Writing to sensitive or non-repository paths is prohibited.");
+  }
+
+  const root = await realpath(repository);
+  const candidate = resolve(root, ...segments);
+  if (candidate !== root && !candidate.startsWith(root + sep)) {
+    throw new Error("Writing outside the repository is prohibited.");
+  }
+
+  const parent = await realpath(resolve(candidate, ".."));
+  if (parent !== root && !parent.startsWith(root + sep)) {
+    throw new Error("Writing outside the repository is prohibited.");
+  }
+
+  try {
+    const target = await lstat(candidate);
+    if (target.isSymbolicLink() || !target.isFile()) {
+      throw new Error("Only regular files may be updated; symbolic links and directories are prohibited.");
+    }
+    await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  return candidate;
+}
+
 const server = new McpServer({
   name: SERVER_NAME,
   version: "1.0.0"
@@ -357,6 +399,38 @@ server.tool(
           type: "text",
           text: String(error)
         }]
+      };
+    }
+  }
+);
+
+server.tool(
+  "write_file",
+  "Create or update a regular text file inside the selected repository. Sensitive paths, symlinks, and paths outside the repository are rejected. Existing files require overwrite=true.",
+  {
+    path: z.string().trim().min(1).max(500),
+    content: z.string().max(MAX_OUTPUT),
+    overwrite: z.boolean().default(false),
+    repository: z.string().default("default")
+  },
+  async ({ path, content, overwrite, repository }) => {
+    try {
+      const target = await safeWritePath(await getRepository(repository), path);
+      if (!overwrite) {
+        await writeFile(target, content, { encoding: "utf8", flag: "wx" });
+      } else {
+        await writeFile(target, content, { encoding: "utf8", flag: "w" });
+      }
+      return {
+        content: [{
+          type: "text",
+          text: (overwrite ? "Updated " : "Created ") + path + " (" + Buffer.byteLength(content, "utf8") + " bytes)."
+        }]
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(error) }]
       };
     }
   }

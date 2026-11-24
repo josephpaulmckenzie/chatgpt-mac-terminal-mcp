@@ -59,13 +59,15 @@ The compiled server entry point is `dist/server.js`.
 Set these environment variables in the local tunnel profile or in the wrapper that launches the MCP server. The server does **not** automatically load a `.env` file; `.env.example` documents the supported variables.
 
 ```text
-REPO=/absolute/path/to/the/project-you-want-to-access
+REPO=/absolute/path/to/your/default/project
+ALLOWED_REPOS=collectors-vault=/Users/your-user/Documents/Code/collectors-vault;mac-terminal-mcp=/Users/your-user/Documents/Code/chatgpt-mac-terminal-mcp
 MCP_SERVER_NAME=mac-terminal
 COMMAND_CENTER_LOG=/tmp/chatgpt-mac-terminal-command-center.log
 ALLOWED_NPM_SCRIPTS=build,test,typecheck
 ```
 
-- `REPO` is required and must be an absolute path to an existing directory. File, Git, and command tools are confined to this repository.
+- `REPO` is required and must be an absolute path to an existing directory. It is exposed to tools as the `default` repository.
+- `ALLOWED_REPOS` optionally adds named repository roots using `alias=/absolute/path` entries separated by semicolons. Each alias is passed through the tools' `repository` parameter. Every configured path must exist when the server starts. Tools remain confined to the selected repository; paths outside it are rejected.
 - `MCP_SERVER_NAME` is an optional server label.
 - `COMMAND_CENTER_LOG` is an optional absolute path for the local dashboard log. It defaults to the system temporary directory.
 - `ALLOWED_NPM_SCRIPTS` is a comma-separated allowlist for `run_npm_script`. Each requested script must also exist in the target repository's `package.json`. The default is `build,test,typecheck`; specify only scripts you have reviewed.
@@ -147,7 +149,7 @@ Examples:
 - "Find where the app handles authentication callbacks."
 - "Run the test script."
 
-The server only runs npm scripts included in `ALLOWED_NPM_SCRIPTS` and present in the target repository's `package.json`. The separate `run_command` tool supports only exact commands implemented in its allowlist. Natural-language requests do not bypass those restrictions.
+The server tools accept an optional `repository` alias (defaulting to `default`). For example, select `collectors-vault` or `mac-terminal-mcp` when those aliases are configured in `ALLOWED_REPOS`. The server only runs npm scripts included in `ALLOWED_NPM_SCRIPTS` and present in the selected repository's `package.json`. The separate `run_command` tool supports only exact commands implemented in its allowlist. Natural-language requests do not bypass those restrictions.
 
 ## Security checklist
 

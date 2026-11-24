@@ -4,9 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { isAbsolute } from "node:path";
 
 const repoValue = process.env.REPO?.trim();
 if (!repoValue) {
